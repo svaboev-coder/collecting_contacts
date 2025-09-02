@@ -1,0 +1,442 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Контакты отелей</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 20px;
+            box-shadow: 0 20px 40px rgba(0,0,0,0.1);
+            overflow: hidden;
+        }
+
+        .header {
+            background: linear-gradient(135deg, #2c3e50 0%, #3498db 100%);
+            color: white;
+            padding: 30px;
+            text-align: center;
+        }
+
+        .header h1 {
+            font-size: 2.5em;
+            margin-bottom: 10px;
+            font-weight: 300;
+        }
+
+        .header p {
+            font-size: 1.1em;
+            opacity: 0.9;
+        }
+
+        .main-content {
+            padding: 40px;
+        }
+
+        .input-section {
+            background: #f8f9fa;
+            padding: 30px;
+            border-radius: 15px;
+            margin-bottom: 30px;
+            border: 2px solid #e9ecef;
+        }
+
+        .input-group {
+            display: flex;
+            gap: 15px;
+            align-items: center;
+            flex-wrap: wrap;
+        }
+
+        .input-group input {
+            flex: 1;
+            min-width: 300px;
+            padding: 15px 20px;
+            border: 2px solid #e9ecef;
+            border-radius: 10px;
+            font-size: 16px;
+            transition: all 0.3s ease;
+        }
+
+        .input-group input:focus {
+            outline: none;
+            border-color: #3498db;
+            box-shadow: 0 0 0 3px rgba(52, 152, 219, 0.1);
+        }
+
+        .btn {
+            background: linear-gradient(135deg, #3498db 0%, #2980b9 100%);
+            color: white;
+            border: none;
+            padding: 15px 30px;
+            border-radius: 10px;
+            font-size: 16px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            white-space: nowrap;
+        }
+
+        .btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 10px 20px rgba(52, 152, 219, 0.3);
+        }
+
+        .btn:disabled {
+            background: #bdc3c7;
+            cursor: not-allowed;
+            transform: none;
+            box-shadow: none;
+        }
+
+        .loading {
+            display: inline-block;
+            width: 20px;
+            height: 20px;
+            border: 3px solid #ffffff;
+            border-radius: 50%;
+            border-top-color: transparent;
+            animation: spin 1s ease-in-out infinite;
+            margin-right: 10px;
+        }
+
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+
+        .results-section {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 30px;
+            margin-top: 30px;
+        }
+
+        .log-section, .contacts-section {
+            background: #f8f9fa;
+            border-radius: 15px;
+            padding: 25px;
+            border: 2px solid #e9ecef;
+        }
+
+        .section-title {
+            font-size: 1.3em;
+            font-weight: 600;
+            margin-bottom: 20px;
+            color: #2c3e50;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .log-container {
+            background: #2c3e50;
+            color: #ecf0f1;
+            padding: 20px;
+            border-radius: 10px;
+            font-family: 'Courier New', monospace;
+            font-size: 14px;
+            max-height: 400px;
+            overflow-y: auto;
+            white-space: pre-wrap;
+        }
+
+        .contacts-table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 15px;
+        }
+
+        .contacts-table th,
+        .contacts-table td {
+            padding: 12px;
+            text-align: left;
+            border-bottom: 1px solid #e9ecef;
+        }
+
+        .contacts-table th {
+            background: #3498db;
+            color: white;
+            font-weight: 600;
+        }
+
+        .contacts-table tr:hover {
+            background: #f1f3f4;
+        }
+
+        .status-indicator {
+            display: inline-block;
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            margin-right: 8px;
+        }
+
+        .status-success { background: #27ae60; }
+        .status-error { background: #e74c3c; }
+        .status-warning { background: #f39c12; }
+        .status-info { background: #3498db; }
+
+        .progress-bar {
+            width: 100%;
+            height: 8px;
+            background: #e9ecef;
+            border-radius: 4px;
+            overflow: hidden;
+            margin: 20px 0;
+        }
+
+        .progress-fill {
+            height: 100%;
+            background: linear-gradient(90deg, #3498db, #2ecc71);
+            width: 0%;
+            transition: width 0.3s ease;
+        }
+
+        @media (max-width: 768px) {
+            .results-section {
+                grid-template-columns: 1fr;
+            }
+            
+            .input-group {
+                flex-direction: column;
+                align-items: stretch;
+            }
+            
+            .input-group input {
+                min-width: auto;
+            }
+            
+            .main-content {
+                padding: 20px;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🏨 Контакты отелей</h1>
+            <p>Сбор контактов курортных мест размещения с помощью ИИ</p>
+        </div>
+
+        <div class="main-content">
+            <div class="input-section">
+                <div class="input-group">
+                    <input 
+                        type="text" 
+                        id="locationInput" 
+                        placeholder="Введите название населенного пункта (например: Сочи, Анапа, Геленджик)"
+                        maxlength="100"
+                    >
+                    <button class="btn" id="collectBtn" onclick="startCollection()">
+                        <span id="btnText">🔍 Собрать</span>
+                    </button>
+                </div>
+                
+                <div class="progress-bar" id="progressBar" style="display: none;">
+                    <div class="progress-fill" id="progressFill"></div>
+                </div>
+            </div>
+
+            <div class="results-section">
+                <div class="log-section">
+                    <div class="section-title">
+                        📋 Лог выполнения
+                    </div>
+                    <div class="log-container" id="logContainer">
+                        Готов к сбору контактов. Введите название населенного пункта и нажмите "Собрать".
+                    </div>
+                </div>
+
+                <div class="contacts-section">
+                    <div class="section-title">
+                        📊 Результаты
+                    </div>
+                    <div id="contactsContainer">
+                        <p style="color: #7f8c8d; text-align: center; margin-top: 50px;">
+                            Результаты сбора контактов появятся здесь
+                        </p>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let isCollecting = false;
+        let currentStep = 0;
+        let totalSteps = 5;
+
+        function startCollection() {
+            const location = document.getElementById('locationInput').value.trim();
+            
+            if (!location) {
+                alert('Пожалуйста, введите название населенного пункта');
+                return;
+            }
+
+            if (isCollecting) {
+                return;
+            }
+
+            isCollecting = true;
+            currentStep = 0;
+            
+            // Обновляем UI
+            document.getElementById('collectBtn').disabled = true;
+            document.getElementById('btnText').innerHTML = '<span class="loading"></span>Сбор...';
+            document.getElementById('progressBar').style.display = 'block';
+            document.getElementById('progressFill').style.width = '0%';
+            
+            // Очищаем предыдущие результаты
+            document.getElementById('logContainer').innerHTML = '';
+            document.getElementById('contactsContainer').innerHTML = '<p style="color: #7f8c8d; text-align: center; margin-top: 50px;">Выполняется сбор контактов...</p>';
+            
+            // Начинаем сбор
+            collectContacts(location);
+        }
+
+        async function collectContacts(location) {
+            try {
+                addLog(`🔍 Начинаем сбор контактов для: ${location}`, 'info');
+                updateProgress(10);
+
+                const response = await fetch('/collect-contacts', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({ location: location })
+                });
+
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
+
+                const result = await response.json();
+                
+                // Отображаем логи
+                result.logs.forEach((log, index) => {
+                    setTimeout(() => {
+                        addLog(log, getLogType(log));
+                        updateProgress(20 + (index * 15));
+                    }, index * 500);
+                });
+
+                // Отображаем контакты
+                setTimeout(() => {
+                    displayContacts(result.contacts);
+                    updateProgress(100);
+                }, result.logs.length * 500 + 1000);
+
+            } catch (error) {
+                console.error('Ошибка:', error);
+                addLog(`❌ Ошибка сбора контактов: ${error.message}`, 'error');
+            } finally {
+                setTimeout(() => {
+                    finishCollection();
+                }, 2000);
+            }
+        }
+
+        function addLog(message, type = 'info') {
+            const logContainer = document.getElementById('logContainer');
+            const timestamp = new Date().toLocaleTimeString();
+            const logEntry = document.createElement('div');
+            
+            logEntry.innerHTML = `
+                <span class="status-indicator status-${type}"></span>
+                [${timestamp}] ${message}
+            `;
+            
+            logContainer.appendChild(logEntry);
+            logContainer.scrollTop = logContainer.scrollHeight;
+        }
+
+        function getLogType(message) {
+            if (message.includes('❌') || message.includes('Ошибка')) return 'error';
+            if (message.includes('⚠️')) return 'warning';
+            if (message.includes('✅') || message.includes('🎉')) return 'success';
+            return 'info';
+        }
+
+        function updateProgress(percentage) {
+            document.getElementById('progressFill').style.width = percentage + '%';
+        }
+
+        function displayContacts(contacts) {
+            const container = document.getElementById('contactsContainer');
+            
+            if (!contacts || contacts.length === 0) {
+                container.innerHTML = '<p style="color: #e74c3c; text-align: center; margin-top: 50px;">Контакты не найдены</p>';
+                return;
+            }
+
+            let tableHTML = `
+                <table class="contacts-table">
+                    <thead>
+                        <tr>
+                            <th>Название</th>
+                            <th>Адрес</th>
+                            <th>Координаты</th>
+                            <th>Email</th>
+                            <th>Сайт</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+            `;
+
+            contacts.forEach(contact => {
+                tableHTML += `
+                    <tr>
+                        <td>${contact.name || 'Не найдено'}</td>
+                        <td>${contact.address || 'Не найдено'}</td>
+                        <td>${contact.coordinates || 'Не найдено'}</td>
+                        <td>${contact.email || 'Не найдено'}</td>
+                        <td>${contact.website ? `<a href="${contact.website}" target="_blank">${contact.website}</a>` : 'Не найдено'}</td>
+                    </tr>
+                `;
+            });
+
+            tableHTML += '</tbody></table>';
+            container.innerHTML = tableHTML;
+        }
+
+        function finishCollection() {
+            isCollecting = false;
+            document.getElementById('collectBtn').disabled = false;
+            document.getElementById('btnText').innerHTML = '🔍 Собрать';
+            document.getElementById('progressBar').style.display = 'none';
+            addLog('🎉 Сбор контактов завершен!', 'success');
+        }
+
+        // Обработка Enter в поле ввода
+        document.getElementById('locationInput').addEventListener('keypress', function(e) {
+            if (e.key === 'Enter') {
+                startCollection();
+            }
+        });
+
+        // Фокус на поле ввода при загрузке
+        window.addEventListener('load', function() {
+            document.getElementById('locationInput').focus();
+        });
+    </script>
+</body>
+</html>
