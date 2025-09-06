@@ -4,13 +4,11 @@ services:
   backend:
     build: ./backend
     ports:
-      - "8000:8000"
+      - "8001:8001"
     environment:
       - OPENAI_API_KEY=${OPENAI_API_KEY}
     volumes:
       - ./backend:/app
-    depends_on:
-      - frontend
 
   frontend:
     build: ./frontend

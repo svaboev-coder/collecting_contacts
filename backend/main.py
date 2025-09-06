@@ -1,23 +1,95 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, FileResponse
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.responses import Response
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
-import openai
+from pydantic import BaseModel, field_validator
 import requests
 from bs4 import BeautifulSoup
 import json
 import os
-import asyncio
-from typing import List, Dict, Any
-import logging
-from utils import contact_extractor, scraper
+from dotenv import load_dotenv
+import hashlib
 
-# Настройка логирования
-logging.basicConfig(level=logging.INFO)
+# Загружаем переменные окружения из .env файла
+load_dotenv()
+import asyncio
+from typing import List, Dict, Any, Optional
+import logging
+from datetime import datetime, timedelta
+import pandas as pd
+from pathlib import Path
+import tempfile
+try:
+    # Запуск из папки backend (python backend/main.py)
+    from utils import contact_extractor, scraper, name_finder
+    from agent import ContactAgent
+    from proxy_api import ProxyAPIClient
+except ImportError:
+    # Запуск как пакет (uvicorn backend.main:app)
+    from backend.utils import contact_extractor, scraper, name_finder
+    from backend.agent import ContactAgent
+    from backend.proxy_api import ProxyAPIClient
+
+# Настройка логирования (принудительно + абсолютный путь)
+LOG_PATH = str((Path(__file__).resolve().parents[1] / 'backend_debug.log'))
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(),
+        logging.FileHandler(LOG_PATH, encoding='utf-8')
+    ],
+    force=True,
+)
 logger = logging.getLogger(__name__)
 
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+BACKEND_DIR = Path(__file__).resolve().parent
+
 app = FastAPI(title="Контакты отелей", version="1.0.0")
+logger.info(f"📝 Лог пишется в файл: {LOG_PATH}")
+
+# Хранилище названий (файловое)
+NAMES_STORE_DIR = Path(__file__).resolve().parent / 'names_store'
+try:
+    NAMES_STORE_DIR.mkdir(parents=True, exist_ok=True)
+    logger.info(f"📁 Директория для названий: {NAMES_STORE_DIR}")
+except Exception as e:
+    logger.error(f"Не удалось создать директорию для названий: {e}")
+
+
+class LoggingMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request, call_next):
+        try:
+            client_host = request.client.host if request.client else "?"
+            logger.info(f"➡️ {request.method} {request.url.path}{'?' + request.url.query if request.url.query else ''} from {client_host}")
+            body_bytes = await request.body()
+            if body_bytes:
+                body_preview = body_bytes.decode('utf-8', errors='ignore')[:2000]
+                logger.info(f"🧾 Request body: {body_preview}")
+
+            async def receive():
+                return {"type": "http.request", "body": body_bytes, "more_body": False}
+
+            request._receive = receive
+
+            response = await call_next(request)
+
+            resp_body = b""
+            async for chunk in response.body_iterator:
+                resp_body += chunk
+            resp_preview = resp_body.decode('utf-8', errors='ignore')[:2000]
+            logger.info(f"⬅️ {response.status_code} {request.method} {request.url.path} body: {resp_preview}")
+
+            return Response(content=resp_body,
+                            status_code=response.status_code,
+                            headers=dict(response.headers),
+                            media_type=response.media_type)
+        except Exception as e:
+            logger.error(f"LoggingMiddleware error: {e}")
+            return await call_next(request)
 
 # Настройка CORS
 app.add_middleware(
@@ -28,11 +100,38 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Настройка OpenAI
-openai.api_key = os.getenv("OPENAI_API_KEY")
+# Включаем подробное логирование HTTP-запросов/ответов
+app.add_middleware(LoggingMiddleware)
+
+# Инициализация ProxyAPI клиента
+try:
+    proxy_client = ProxyAPIClient()
+    logger.info("✅ ProxyAPI клиент успешно инициализирован")
+    try:
+        from proxy_api import ProxyAPIClient as _P
+        # выведем используемый base_url, если есть
+        logger.info(f"🌐 ProxyAPI BASE URL: {proxy_client.base_url}")
+    except Exception:
+        pass
+except Exception as e:
+    logger.error(f"❌ Ошибка инициализации ProxyAPI клиента: {e}")
+    proxy_client = None
+
+# Кэш для результатов
+results_cache = {}
+CACHE_EXPIRY_HOURS = 24
 
 class LocationRequest(BaseModel):
     location: str
+    
+    @field_validator('location')
+    @classmethod
+    def validate_location(cls, v):
+        if not v or len(v.strip()) < 2:
+            raise ValueError('Название населенного пункта должно содержать минимум 2 символа')
+        if len(v.strip()) > 100:
+            raise ValueError('Название населенного пункта слишком длинное')
+        return v.strip()
 
 class ContactInfo(BaseModel):
     name: str
@@ -52,139 +151,362 @@ class CollectionPlan(BaseModel):
 class CollectionResult(BaseModel):
     logs: List[str]
     contacts: List[ContactInfo]
+    timestamp: str
+    location: str
+
+class NameListResult(BaseModel):
+    location: str
+    names: List[str]
+    timestamp: str
 
 @app.get("/", response_class=HTMLResponse)
 async def read_root():
     with open("frontend/index.html", "r", encoding="utf-8") as f:
         return HTMLResponse(content=f.read())
 
-@app.post("/collect-contacts", response_model=CollectionResult)
-async def collect_contacts(request: LocationRequest):
+def _names_file_path(location: str) -> Path:
+    key = hashlib.sha1(location.strip().lower().encode('utf-8')).hexdigest()[:16]
+    safe_loc = ''.join(ch for ch in location if ch.isalnum() or ch in (' ', '-', '_')).strip().replace(' ', '_')
+    fname = f"names_{safe_loc}_{key}.json"
+    return NAMES_STORE_DIR / fname
+
+def _write_names_file(location: str, names: List[str]) -> Path:
+    path = _names_file_path(location)
+    data = {
+        'location': location,
+        'names': names,
+        'timestamp': datetime.now().isoformat()
+    }
+    with open(path, 'w', encoding='utf-8') as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+    return path
+
+def _read_names_file(location: str) -> Optional[List[str]]:
+    path = _names_file_path(location)
+    if not path.exists():
+        return None
     try:
+        with open(path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        if isinstance(data, dict) and isinstance(data.get('names'), list):
+            return data['names']
+    except Exception as e:
+        logger.warning(f"Не удалось прочитать файл названий для {location}: {e}")
+    return None
+
+def _cleanup_temp_names_files(location: Optional[str] = None) -> int:
+    """Удаляет временные файлы temp_названия_*.xlsx. Если указан location — только для него."""
+    try:
+        patterns: List[str] = []
+        if location and location.strip():
+            patterns.append(f"temp_названия_{location.strip()}_*.xlsx")
+        # Всегда подчищаем общий мусор на всякий случай
+        patterns.append("temp_названия_*.xlsx")
+
+        checked_dirs = {PROJECT_ROOT, BACKEND_DIR, Path.cwd()}
+        removed = 0
+        for d in checked_dirs:
+            for pat in patterns:
+                for p in d.glob(pat):
+                    try:
+                        p.unlink()
+                        removed += 1
+                    except Exception as e:
+                        logger.warning(f"Не удалось удалить временный файл {p}: {e}")
+        if removed:
+            logger.info(f"🧹 Удалено временных файлов названий: {removed}")
+        return removed
+    except Exception as e:
+        logger.warning(f"Ошибка очистки временных файлов названий: {e}")
+        return 0
+
+def _normalize(s: str) -> str:
+    return ''.join(ch.lower() for ch in s if ch.isalnum() or ch.isspace()).strip()
+
+def _looks_like_same_place(query: str, candidate_name: str) -> bool:
+    q = _normalize(query)
+    c = _normalize(candidate_name)
+    if not q or not c:
+        return False
+    # точное вхождение или совпадение по словам
+    if q == c:
+        return True
+    if q in c:
+        return True
+    # проверка по словам (все слова запроса присутствуют в названии результата)
+    q_words = [w for w in q.split() if w]
+    return all(w in c for w in q_words)
+
+def _validate_location_exists(location: str) -> bool:
+    """Проверяет существование населённого пункта через Nominatim.
+    Возвращает True только для place/boundary соответствующих типов и при разумном совпадении названия.
+    """
+    try:
+        url = "https://nominatim.openstreetmap.org/search"
+        params = {"q": location, "format": "jsonv2", "limit": 1, "addressdetails": 1}
+        headers = {
+            "Accept": "application/json",
+            "User-Agent": "ResortContactsCollector/1.0 (contact@example.com)"
+        }
+        resp = requests.get(url, params=params, headers=headers, timeout=15)
+        if resp.status_code != 200:
+            raise Exception(f"HTTP {resp.status_code}")
+        data = resp.json()
+        if not isinstance(data, list) or not data:
+            # Фолбэк через наш name_finder (с корректным UA)
+            center = None
+            try:
+                center = name_finder._geocode_city_center(location)  # noqa: SLF001
+            except Exception:
+                center = None
+            return bool(center)
+        item = data[0]
+        item_class = (item.get("class") or "").lower()
+        item_type = (item.get("type") or "").lower()
+        allowed_types = {"city", "town", "village", "hamlet", "municipality", "county", "state", "province", "suburb", "locality", "neighbourhood"}
+        if item_class not in {"place", "boundary"}:
+            return False
+        # для boundary принимаем administrative
+        if item_class == "boundary" and item_type not in {"administrative"}:
+            return False
+        if item_class == "place" and item_type and item_type not in allowed_types:
+            # не отвергаем сразу: фолбэк через геоцентр
+            center = None
+            try:
+                center = name_finder._geocode_city_center(location)  # noqa: SLF001
+            except Exception:
+                center = None
+            return bool(center)
+        disp = item.get("display_name") or item.get("name") or ""
+        if _looks_like_same_place(location, disp):
+            return True
+        # Фолбэк: если строковое сопоставление не прошло — попробуем центр
+        center = None
+        try:
+            center = name_finder._geocode_city_center(location)  # noqa: SLF001
+        except Exception:
+            center = None
+        return bool(center)
+    except Exception as e:
+        logger.warning(f"Ошибка валидации населённого пункта: {e}")
+        # Последний фолбэк
+        try:
+            center = name_finder._geocode_city_center(location)  # noqa: SLF001
+            return bool(center)
+        except Exception:
+            return False
+
+@app.post("/list-names", response_model=NameListResult)
+async def list_names(request: LocationRequest):
+    try:
+        # Удаляем предыдущие временные файлы экспорта для чистоты
+        _cleanup_temp_names_files(request.location)
+
+        # 1) Пытаемся быстро отдать из файла, если он есть и не пустой
+        cached = _read_names_file(request.location)
+        if cached:
+            logger.info(f"Отдаю названия из файла для {request.location}: {len(cached)}")
+            return NameListResult(location=request.location, names=cached, timestamp=datetime.now().isoformat())
+
+        # 2) Ищем названия и сразу возвращаем результат (без проверки города)
+        names = name_finder.find_accommodation_names(request.location)
+        _write_names_file(request.location, names)
+        return NameListResult(
+            location=request.location,
+            names=names,
+            timestamp=datetime.now().isoformat(),
+        )
+    except HTTPException as e:
+        # Пробрасываем как есть, чтобы сохранить статус-код (например, 404)
+        raise e
+    except Exception as e:
+        logger.error(f"Ошибка получения списка названий: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Ошибка получения списка названий: {str(e)}")
+
+@app.get("/export-names-excel/{location}")
+async def export_names_excel_get(location: str):
+    """Экспорт списка названий (GET) с приоритетом чтения из файла."""
+    try:
+        names = _read_names_file(location) or []
+        if not names:
+            # Если файла нет — находим и сохраняем, чтобы в следующий раз было быстро
+            names = name_finder.find_accommodation_names(location)
+            _write_names_file(location, names)
+
+        df = pd.DataFrame({'name': names})
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f'названия_{location}_{timestamp}.xlsx'
+        temp_path = f"temp_{filename}"
+
+        try:
+            with pd.ExcelWriter(temp_path, engine='openpyxl') as writer:
+                df.to_excel(writer, index=False, sheet_name='Названия')
+                ws = writer.sheets['Названия']
+                ws.insert_rows(1)
+                ws['A1'] = f'Названия для: {location}'
+                ws.insert_rows(2)
+                ws['A2'] = f'Дата экспорта: {datetime.now().strftime("%d.%m.%Y %H:%M")}'
+                ws.insert_rows(3)
+                ws['A3'] = f'Найдено: {len(names)}'
+
+            return FileResponse(
+                temp_path,
+                media_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+                filename=filename
+            )
+        except Exception as e:
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+            raise HTTPException(status_code=500, detail=f"Ошибка создания Excel: {str(e)}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Ошибка экспорта названий: {str(e)}")
+
+@app.post("/collect-contacts", response_model=CollectionResult)
+async def collect_contacts(request: LocationRequest, background_tasks: BackgroundTasks):
+    try:
+        # Проверяем кэш
+        cache_key = f"{request.location.lower().strip()}"
+        if cache_key in results_cache:
+            cached_result = results_cache[cache_key]
+            if datetime.now() - cached_result['timestamp'] < timedelta(hours=CACHE_EXPIRY_HOURS):
+                logger.info(f"Возвращаем кэшированный результат для {request.location}")
+                return cached_result['result']
+            else:
+                # Удаляем устаревший кэш
+                del results_cache[cache_key]
+        
         logs = []
         contacts = []
         
-        # Шаг 1: Получение плана сбора контактов
-        logs.append(f"🔍 Начинаем сбор контактов для: {request.location}")
+        # Агентный режим
+        logs.append(f"🤖 Агент начинает сбор для: {request.location}")
+        if not proxy_client:
+            raise Exception("ProxyAPI клиент не инициализирован")
+        agent = ContactAgent(proxy_client=proxy_client)
+        agent_contacts, agent_logs = await agent.run(request.location)
+        logs.extend(agent_logs)
+        contacts = [ContactInfo(**c) for c in agent_contacts]
         
-        plan_prompt = f"""
-        Составь пошаговый план (5-6 шагов) для сбора контактов мест размещения 
-        (отелей, баз отдыха, пансионатов, санаториев) в заданном населенном пункте "{request.location}".
+        # Создаем результат
+        result = CollectionResult(
+            logs=logs,
+            contacts=contacts,
+            timestamp=datetime.now().isoformat(),
+            location=request.location
+        )
         
-        Верни результат в JSON формате:
-        {{
-            "steps": [
-                {{
-                    "step": 1,
-                    "description": "Описание шага",
-                    "prompt": "Промпт для ChatGPT"
-                }}
-            ]
-        }}
+        # Кэшируем результат
+        results_cache[cache_key] = {
+            'result': result,
+            'timestamp': datetime.now()
+        }
         
-        Каждый шаг должен быть направлен на поиск и сбор конкретной информации:
-        - Поиск источников информации
-        - Извлечение названий организаций
-        - Сбор адресов и координат
-        - Поиск email адресов
-        - Поиск официальных сайтов
-        """
+        # Очищаем старые записи кэша
+        background_tasks.add_task(cleanup_old_cache)
         
-        logs.append("📋 Формируем план сбора контактов...")
-        
-        try:
-            plan_response = openai.ChatCompletion.create(
-                model="gpt-3.5-turbo",
-                messages=[{"role": "user", "content": plan_prompt}],
-                max_tokens=1000
-            )
-            
-            plan_content = plan_response.choices[0].message.content
-            logs.append("✅ План сбора получен")
-            
-            # Парсинг JSON плана
-            try:
-                plan_data = json.loads(plan_content)
-                plan = CollectionPlan(**plan_data)
-            except json.JSONDecodeError:
-                # Если JSON не парсится, создаем базовый план
-                logs.append("⚠️ Ошибка парсинга плана, используем базовый план")
-                plan = create_basic_plan(request.location)
-                
-        except Exception as e:
-            logs.append(f"⚠️ Ошибка получения плана: {str(e)}")
-            plan = create_basic_plan(request.location)
-        
-        # Выполнение шагов плана
-        intermediate_results = []
-        
-        for step in plan.steps:
-            logs.append(f"🚀 Выполняем шаг {step.step}: {step.description}")
-            
-            try:
-                # Выполнение шага
-                step_result = await execute_collection_step(step, request.location, intermediate_results)
-                intermediate_results.append(step_result)
-                logs.append(f"✅ Шаг {step.step} выполнен")
-                
-            except Exception as e:
-                logs.append(f"❌ Ошибка в шаге {step.step}: {str(e)}")
-                continue
-        
-        # Финальный анализ и формирование таблицы
-        logs.append("🔍 Выполняем финальный анализ...")
-        
-        try:
-            final_prompt = f"""
-            На основе собранной информации о местах размещения в {request.location}, 
-            сформируй итоговую таблицу контактов в следующем формате:
-            
-            {json.dumps([result for result in intermediate_results if result], ensure_ascii=False, indent=2)}
-            
-            Верни результат в JSON формате:
-            {{
-                "contacts": [
-                    {{
-                        "name": "Название организации",
-                        "address": "Почтовый адрес",
-                        "coordinates": "Геокоординаты (широта, долгота)",
-                        "email": "Email адрес",
-                        "website": "Ссылка на официальный сайт"
-                    }}
-                ]
-            }}
-            
-            Если какая-то информация отсутствует, укажи "Не найдено".
-            """
-            
-            final_response = openai.ChatCompletion.create(
-                model="gpt-3.5-turbo",
-                messages=[{"role": "user", "content": final_prompt}],
-                max_tokens=2000
-            )
-            
-            final_content = final_response.choices[0].message.content
-            
-            try:
-                final_data = json.loads(final_content)
-                if "contacts" in final_data:
-                    contacts = [ContactInfo(**contact) for contact in final_data["contacts"]]
-                    logs.append(f"✅ Собрано {len(contacts)} контактов")
-                else:
-                    logs.append("⚠️ Не удалось получить контакты из финального анализа")
-            except json.JSONDecodeError:
-                logs.append("⚠️ Ошибка парсинга финального результата")
-                
-        except Exception as e:
-            logs.append(f"❌ Ошибка финального анализа: {str(e)}")
-        
-        logs.append("🎉 Сбор контактов завершен!")
-        
-        return CollectionResult(logs=logs, contacts=contacts)
+        return result
         
     except Exception as e:
         logger.error(f"Ошибка сбора контактов: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Ошибка сбора контактов: {str(e)}")
+
+@app.get("/export-excel/{location}")
+async def export_excel(location: str):
+    """Экспорт результатов в Excel файл"""
+    try:
+        cache_key = f"{location.lower().strip()}"
+        if cache_key not in results_cache:
+            raise HTTPException(status_code=404, detail="Результаты для данного населенного пункта не найдены")
+        
+        cached_data = results_cache[cache_key]
+        contacts = cached_data['result'].contacts
+        
+        if not contacts:
+            # Создаем пустой DataFrame с заголовками
+            df = pd.DataFrame(columns=['name', 'address', 'coordinates', 'email', 'website'])
+            logger.info(f"Создаем пустой Excel файл для {location} (0 контактов)")
+        else:
+            # Создаем DataFrame с данными
+            df = pd.DataFrame([contact.model_dump() for contact in contacts])
+            logger.info(f"Создаем Excel файл для {location} с {len(contacts)} контактами")
+        
+        # Создаем временный файл
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f'контакты_{location}_{timestamp}.xlsx'
+        
+        # Создаем временный файл в текущей директории
+        temp_path = f"temp_{filename}"
+        
+        try:
+            # Добавляем заголовок с информацией
+            with pd.ExcelWriter(temp_path, engine='openpyxl') as writer:
+                df.to_excel(writer, index=False, sheet_name='Контакты')
+                
+                # Получаем рабочую книгу для добавления метаданных
+                workbook = writer.book
+                worksheet = writer.sheets['Контакты']
+                
+                # Добавляем заголовок с информацией
+                worksheet.insert_rows(1)
+                worksheet['A1'] = f'Контакты для: {location}'
+                worksheet['A2'] = f'Дата сбора: {datetime.now().strftime("%d.%m.%Y %H:%M")}'
+                worksheet['A3'] = f'Найдено контактов: {len(contacts)}'
+                
+                # Объединяем ячейки для заголовка
+                worksheet.merge_cells('A1:E1')
+                worksheet.merge_cells('A2:E2')
+                worksheet.merge_cells('A3:E3')
+            
+            logger.info(f"Excel файл успешно создан: {temp_path}")
+            
+            # Возвращаем файл
+            return FileResponse(
+                temp_path,
+                media_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+                filename=filename
+            )
+        except Exception as e:
+            logger.error(f"Ошибка создания Excel файла: {str(e)}")
+            # Удаляем временный файл в случае ошибки
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+            raise HTTPException(status_code=500, detail=f"Ошибка создания Excel файла: {str(e)}")
+        
+    except Exception as e:
+        logger.error(f"Ошибка экспорта в Excel: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Ошибка экспорта: {str(e)}")
+
+@app.get("/cache-status")
+async def get_cache_status():
+    """Получение статуса кэша"""
+    cache_info = {
+        'total_entries': len(results_cache),
+        'entries': []
+    }
+    
+    for location, data in results_cache.items():
+        age_hours = (datetime.now() - data['timestamp']).total_seconds() / 3600
+        cache_info['entries'].append({
+            'location': location,
+            'age_hours': round(age_hours, 2),
+            'contacts_count': len(data['result'].contacts),
+            'timestamp': data['timestamp'].isoformat()
+        })
+    
+    return cache_info
+
+async def cleanup_old_cache():
+    """Очистка устаревших записей кэша"""
+    current_time = datetime.now()
+    expired_keys = []
+    
+    for key, data in results_cache.items():
+        if current_time - data['timestamp'] > timedelta(hours=CACHE_EXPIRY_HOURS):
+            expired_keys.append(key)
+    
+    for key in expired_keys:
+        del results_cache[key]
+        logger.info(f"Удалена устаревшая запись кэша: {key}")
 
 async def execute_collection_step(step: CollectionStep, location: str, previous_results: List[str]) -> str:
     """Выполнение одного шага сбора контактов"""
@@ -202,16 +524,34 @@ async def execute_collection_step(step: CollectionStep, location: str, previous_
     """
     
     try:
-        response = openai.ChatCompletion.create(
-            model="gpt-3.5-turbo",
+        if not proxy_client:
+            raise Exception("ProxyAPI клиент не инициализирован")
+            
+        logger.info(f"=== ВЫПОЛНЕНИЕ ШАГА {step.step} ===")
+        logger.info(f"Выполняем шаг: {step.step} - {step.description}")
+        logger.info(f"Промпт для шага: {enhanced_prompt}")
+        
+        response = await proxy_client.chat_completion(
+            model="claude-3-5-sonnet-20240620",
             messages=[{"role": "user", "content": enhanced_prompt}],
             max_tokens=1000
         )
         
-        result = response.choices[0].message.content
+        logger.info(f"=== ПОЛУЧЕН ОТВЕТ ДЛЯ ШАГА {step.step} ===")
+        logger.info(f"ProxyAPI ответ для шага получен: {response}")
+        try:
+            result = response['choices'][0]['message']['content']
+        except Exception:
+            logger.error(f"Неверный формат ответа шага: {response}")
+            raise
+        logger.info(f"Результат шага {step.step}: {result[:200]}...")
+        logger.info(f"Полный результат шага {step.step}: {result}")
         
         # Дополнительная обработка результата для извлечения контактов
+        logger.info(f"=== ИЗВЛЕЧЕНИЕ КОНТАКТОВ ИЗ ШАГА {step.step} ===")
+        logger.info(f"Извлекаем контакты из результата шага {step.step}")
         extracted_contacts = contact_extractor.extract_contacts_from_text(result)
+        logger.info(f"Извлеченные контакты из шага {step.step}: {extracted_contacts}")
         
         # Если найдены контакты, добавляем их к результату
         if any(extracted_contacts.values()):
@@ -224,12 +564,17 @@ Email адреса: {', '.join(extracted_contacts.get('emails', []))}
 Координаты: {', '.join(extracted_contacts.get('coordinates', []))}
 Адреса: {', '.join(extracted_contacts.get('addresses', []))}
 """
+            logger.info(f"Шаг {step.step} завершен с контактами")
             return enhanced_result
         
+        logger.info(f"Шаг {step.step} завершен без контактов")
         return result
         
     except Exception as e:
-        return f"Oшибка выполнения шага: {str(e)}"
+        logger.error(f"Ошибка выполнения шага {step.step}: {str(e)}")
+        logger.error(f"Тип ошибки шага: {type(e).__name__}")
+        logger.error(f"Детали ошибки шага: {e}")
+        return f"Ошибка выполнения шага: {str(e)}"
 
 def create_basic_plan(location: str) -> CollectionPlan:
     """Создание базового плана сбора контактов"""
@@ -268,6 +613,29 @@ def create_basic_plan(location: str) -> CollectionPlan:
 async def health_check():
     return {"status": "healthy", "service": "hotel-contacts-collector"}
 
+@app.get("/log-path")
+async def get_log_path():
+    try:
+        exists = os.path.exists(LOG_PATH)
+        size = os.path.getsize(LOG_PATH) if exists else 0
+        return {"path": LOG_PATH, "exists": exists, "size": size}
+    except Exception as e:
+        logger.error(f"Ошибка чтения пути лога: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/logs")
+async def get_logs(tail: int = 200):
+    try:
+        if not os.path.exists(LOG_PATH):
+            return {"lines": [], "message": "Файл лога не найден", "path": LOG_PATH}
+        with open(LOG_PATH, "r", encoding="utf-8", errors="ignore") as f:
+            lines = f.readlines()
+        tail = max(1, min(tail, 5000))
+        return {"path": LOG_PATH, "lines": [l.rstrip("\n") for l in lines[-tail:]]}
+    except Exception as e:
+        logger.error(f"Ошибка чтения лога: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(app, host="0.0.0.0", port=8001)

@@ -68,3 +68,9 @@ coverage.xml
 *.cover
 .hypothesis/
 .pytest_cache/
+
+# Temp exports
+temp_названия_*.xlsx
+backend/temp_названия_*.xlsx
+# Data cache
+backend/names_store/*.json
