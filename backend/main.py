@@ -24,12 +24,12 @@ import tempfile
 try:
     # Запуск из папки backend (python backend/main.py)
     from utils import contact_extractor, scraper, name_finder
-    from agent import ContactAgent
+    from agent import ContactAgent, WebsiteFinderAgent
     from proxy_api import ProxyAPIClient
 except ImportError:
     # Запуск как пакет (uvicorn backend.main:app)
     from backend.utils import contact_extractor, scraper, name_finder
-    from backend.agent import ContactAgent
+    from backend.agent import ContactAgent, WebsiteFinderAgent
     from backend.proxy_api import ProxyAPIClient
 
 # Настройка логирования (принудительно + абсолютный путь)
@@ -158,6 +158,37 @@ class NameListResult(BaseModel):
     location: str
     names: List[str]
     timestamp: str
+
+class WebsiteFindRequest(BaseModel):
+    location: str
+    names: List[str]
+
+    @field_validator('location')
+    @classmethod
+    def _validate_location(cls, v):
+        if not v or len(v.strip()) < 2:
+            raise ValueError('Название населенного пункта должно содержать минимум 2 символа')
+        if len(v.strip()) > 100:
+            raise ValueError('Название населенного пункта слишком длинное')
+        return v.strip()
+
+class WebsiteItem(BaseModel):
+    name: str
+    website: str
+
+class WebsiteFindResult(BaseModel):
+    location: str
+    items: List[WebsiteItem]
+    logs: List[str]
+    timestamp: str
+
+class WebsiteExportItem(BaseModel):
+    name: str
+    website: str
+
+class WebsiteExportRequest(BaseModel):
+    location: str
+    items: List[WebsiteExportItem]
 
 @app.get("/", response_class=HTMLResponse)
 async def read_root():
@@ -301,21 +332,31 @@ async def list_names(request: LocationRequest):
     try:
         # Удаляем предыдущие временные файлы экспорта для чистоты
         _cleanup_temp_names_files(request.location)
-
         # 1) Пытаемся быстро отдать из файла, если он есть и не пустой
         cached = _read_names_file(request.location)
         if cached:
             logger.info(f"Отдаю названия из файла для {request.location}: {len(cached)}")
             return NameListResult(location=request.location, names=cached, timestamp=datetime.now().isoformat())
 
-        # 2) Ищем названия и сразу возвращаем результат (без проверки города)
-        names = name_finder.find_accommodation_names(request.location)
-        _write_names_file(request.location, names)
-        return NameListResult(
-            location=request.location,
-            names=names,
-            timestamp=datetime.now().isoformat(),
-        )
+        # 2) Ищем названия в отдельном потоке с таймаутом, чтобы не блокировать event loop
+        start_ts = datetime.now()
+        logger.info(f"Начинаю поиск названий для {request.location}")
+        try:
+            names = await asyncio.wait_for(asyncio.to_thread(name_finder.find_accommodation_names, request.location), timeout=45)
+        except asyncio.TimeoutError:
+            logger.warning(f"Таймаут поиска названий для {request.location}")
+            names = []
+        except Exception as e:
+            logger.error(f"Ошибка поиска названий для {request.location}: {e}")
+            names = []
+        finally:
+            took = (datetime.now() - start_ts).total_seconds()
+            logger.info(f"Поиск названий для {request.location} завершён за {took:.1f}с. Найдено: {len(names)}")
+
+        # 3) Сохраняем результат только если что-то нашли
+        if names:
+            _write_names_file(request.location, names)
+        return NameListResult(location=request.location, names=names or [], timestamp=datetime.now().isoformat())
     except HTTPException as e:
         # Пробрасываем как есть, чтобы сохранить статус-код (например, 404)
         raise e
@@ -360,6 +401,63 @@ async def export_names_excel_get(location: str):
             raise HTTPException(status_code=500, detail=f"Ошибка создания Excel: {str(e)}")
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Ошибка экспорта названий: {str(e)}")
+
+@app.post("/export-names-excel")
+async def export_names_excel_post(req: WebsiteExportRequest):
+    """Экспорт списка названий (и сайтов, если переданы) через POST."""
+    try:
+        items = req.items or []
+        # Всегда экспортируем две колонки: name и website (даже если сайт не найден)
+        if not items:
+            df = pd.DataFrame(columns=['name', 'website'])
+        else:
+            df = pd.DataFrame([
+                {'name': (it.name or ''), 'website': ((it.website or '').strip() or 'сайт не найден')}
+                for it in items
+            ], columns=['name', 'website'])
+
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f'названия_{req.location}_{timestamp}.xlsx'
+        temp_path = f"temp_{filename}"
+        try:
+            with pd.ExcelWriter(temp_path, engine='openpyxl') as writer:
+                sheet = 'Названия'
+                df.to_excel(writer, index=False, sheet_name=sheet)
+                ws = writer.sheets[sheet]
+                ws.insert_rows(1)
+                ws['A1'] = f'Названия для: {req.location}'
+                ws.insert_rows(2)
+                ws['A2'] = f'Дата экспорта: {datetime.now().strftime("%d.%m.%Y %H:%M")}'
+                # Объединяем заголовок на две колонки (name, website)
+                ws.merge_cells('A1:B1')
+                ws.merge_cells('A2:B2')
+            return FileResponse(
+                temp_path,
+                media_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+                filename=filename
+            )
+        except Exception as e:
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+            raise HTTPException(status_code=500, detail=f"Ошибка создания Excel: {str(e)}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Ошибка экспорта названий: {str(e)}")
+
+@app.post("/find-websites", response_model=WebsiteFindResult)
+async def find_websites(request: WebsiteFindRequest):
+    try:
+        # Выполняем работу в отдельном потоке, чтобы не блокировать event loop
+        agent = WebsiteFinderAgent(proxy_client=proxy_client)
+        items, logs = await asyncio.to_thread(agent.find_for_names, request.location, request.names)
+        return WebsiteFindResult(
+            location=request.location,
+            items=[WebsiteItem(**it) for it in items],
+            logs=logs,
+            timestamp=datetime.now().isoformat(),
+        )
+    except Exception as e:
+        logger.error(f"Ошибка поиска сайтов: {e}")
+        raise HTTPException(status_code=500, detail=f"Ошибка поиска сайтов: {e}")
 
 @app.post("/collect-contacts", response_model=CollectionResult)
 async def collect_contacts(request: LocationRequest, background_tasks: BackgroundTasks):
@@ -475,6 +573,37 @@ async def export_excel(location: str):
     except Exception as e:
         logger.error(f"Ошибка экспорта в Excel: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Ошибка экспорта: {str(e)}")
+
+@app.post("/export-websites-excel")
+async def export_websites_excel(req: WebsiteExportRequest):
+    """Экспорт найденных сайтов в Excel по текущему списку имён."""
+    try:
+        rows = [{"name": it.name, "website": it.website} for it in (req.items or [])]
+        df = pd.DataFrame(rows if rows else [], columns=["name", "website"])
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f'сайты_{req.location}_{timestamp}.xlsx'
+        temp_path = f"temp_{filename}"
+        try:
+            with pd.ExcelWriter(temp_path, engine='openpyxl') as writer:
+                df.to_excel(writer, index=False, sheet_name='Сайты')
+                ws = writer.sheets['Сайты']
+                ws.insert_rows(1)
+                ws['A1'] = f'Сайты для: {req.location}'
+                ws.insert_rows(2)
+                ws['A2'] = f'Дата экспорта: {datetime.now().strftime("%d.%m.%Y %H:%M")}'
+                ws.merge_cells('A1:B1')
+                ws.merge_cells('A2:B2')
+            return FileResponse(
+                temp_path,
+                media_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+                filename=filename
+            )
+        except Exception as e:
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+            raise HTTPException(status_code=500, detail=f"Ошибка создания Excel: {str(e)}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Ошибка экспорта сайтов: {str(e)}")
 
 @app.get("/cache-status")
 async def get_cache_status():

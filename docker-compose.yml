@@ -5,15 +5,19 @@ services:
     build: ./backend
     ports:
       - "8001:8001"
+    env_file:
+      - .env
     environment:
       - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - PROXYAPI_KEY=${PROXYAPI_KEY}
+      - PROXYAPI_BASE_URL=${PROXYAPI_BASE_URL}
     volumes:
       - ./backend:/app
 
   frontend:
     build: ./frontend
     ports:
-      - "80:80"
+      - "8080:80"
     volumes:
       - ./frontend:/usr/share/nginx/html
     depends_on:

@@ -382,11 +382,35 @@
                 </div>
             </div>
 
+            <div class="results-section" id="websitesSection" style="display:none;">
+                <h3>🔗 Найденные официальные сайты</h3>
+                <div class="table-container">
+                    <table class="results-table">
+                        <thead>
+                            <tr>
+                                <th>Название</th>
+                                <th>Официальный сайт</th>
+                            </tr>
+                        </thead>
+                        <tbody id="websitesBody"></tbody>
+                    </table>
+                </div>
+            </div>
+
             <div class="export-section" id="namesExportSection" style="display:none;">
                 <h3>📊 Список названий готов</h3>
-                <button id="namesExportBtn" class="btn btn-secondary" onclick="exportNamesToExcel()">
-                    📥 Экспорт в Excel
-                </button>
+                <div id="websitesSummary" class="progress-text" style="margin:6px 0 10px 0; display:none;"></div>
+                <div style="display:flex; gap:10px; align-items:center;">
+                    <button id="namesExportBtn" class="btn btn-secondary btn-small" onclick="exportNamesWithSitesExcel()">
+                        📥 Экспорт (Excel)
+                    </button>
+                    <button id="findWebsitesBtn" class="btn btn-primary btn-small" onclick="findWebsitesSequential()">
+                        🔗 Найти сайты
+                    </button>
+                    <button id="stopWebsitesBtn" class="btn btn-secondary btn-small" onclick="stopFindingWebsites()" disabled>
+                        ⛔ Стоп
+                    </button>
+                </div>
             </div>
 
             <div class="log-section" id="logSection">
@@ -413,6 +437,8 @@
         let currentLocation = '';
         let isCollecting = false;
         let currentNames = [];
+        let currentWebsiteItems = [];
+        let stopFinding = false;
 
         // Модальное окно
         function showModal(title, message) {
@@ -465,6 +491,17 @@
             document.getElementById('resultsBody').innerHTML = '';
             document.getElementById('resultsSection').style.display = 'none';
             document.getElementById('exportSection').style.display = 'none';
+        }
+
+        function clearWebsites() {
+            try {
+                currentWebsiteItems = [];
+                const tbody = document.getElementById('websitesBody');
+                if (tbody) tbody.innerHTML = '';
+                const section = document.getElementById('websitesSection');
+                if (section) section.style.display = 'none';
+                // кнопка экспорта единая: управляется отдельно
+            } catch {}
         }
 
         function startCollection() {
@@ -595,6 +632,10 @@
                 currentLocation = location;
                 document.getElementById('namesSection').style.display = 'none';
                 document.getElementById('namesExportSection').style.display = 'none';
+                const sum = document.getElementById('websitesSummary');
+                if (sum) { sum.style.display = 'none'; sum.textContent = ''; }
+                // очищаем результаты сайтов при новом поиске названий
+                clearWebsites();
                 showProgress();
                 updateProgress(15, 'Подготовка к поиску названий...');
                 const resp = await fetch('http://127.0.0.1:8001/list-names', {
@@ -630,6 +671,7 @@
                 } else {
                     addLog(`Получено названий: ${names.length}`, 'success');
                     document.getElementById('namesExportSection').style.display = 'block';
+                    // таблица сайтов пока скрыта, до старта поиска сайтов
                     if (exportBtn) exportBtn.disabled = false;
                 }
                 updateProgress(100, 'Готово!');
@@ -715,6 +757,188 @@
                     addLog(`Ошибка экспорта названий: ${err.message}`, 'error');
                     alert('Ошибка при экспорте названий: ' + err.message);
                 }
+            }
+        }
+
+        async function exportNamesWithSitesExcel() {
+            try {
+                // Если уже есть сайты — шлём POST для единого файла name+website
+                const items = Array.isArray(currentWebsiteItems) && currentWebsiteItems.length > 0
+                  ? currentWebsiteItems.map(it => ({ name: String(it.name||''), website: String(it.website||'') }))
+                  : (currentNames||[]).map(n => ({ name: String(n||''), website: '' }));
+                const resp = await fetch('http://127.0.0.1:8001/export-names-excel', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json; charset=utf-8', 'Accept': 'application/json; charset=utf-8' },
+                    body: JSON.stringify({ location: currentLocation||'', items })
+                });
+                if (!resp.ok) {
+                    const txt = await resp.text().catch(()=>'');
+                    throw new Error(`HTTP ${resp.status}: ${txt}`);
+                }
+                const blob = await resp.blob();
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = `названия_${currentLocation || 'город'}_${new Date().toISOString().split('T')[0]}.xlsx`;
+                document.body.appendChild(a);
+                a.click();
+                URL.revokeObjectURL(url);
+                document.body.removeChild(a);
+                addLog('Экспорт (имена+сайты) завершён (xlsx)', 'success');
+            } catch (e) {
+                addLog(`Ошибка экспорта: ${e.message}`, 'error');
+            }
+        }
+
+        async function findWebsitesSequential() {
+            const location = currentLocation;
+            if (!location) {
+                showModal('Нет города', 'Сначала введите город и получите список названий.');
+                return;
+            }
+            if (!Array.isArray(currentNames) || currentNames.length === 0) {
+                showModal('Нет названий', 'Сначала получите список организаций (Найти отели).');
+                return;
+            }
+            try {
+                addLog(`Запускаю поиск сайтов для ${currentNames.length} организаций в ${location}...`, 'info');
+                // очищаем предыдущую таблицу сайтов до начала нового поиска
+                clearWebsites();
+                const findBtn = document.getElementById('findWebsitesBtn');
+                const stopBtn = document.getElementById('stopWebsitesBtn');
+                if (findBtn) findBtn.disabled = true;
+                if (stopBtn) stopBtn.disabled = false;
+                stopFinding = false;
+                showProgress();
+                const summary = document.getElementById('websitesSummary');
+                if (summary) { summary.style.display = 'none'; summary.textContent = ''; }
+                const total = currentNames.length;
+                let aggregated = [];
+                let interrupted = false;
+                for (let i = 0; i < total; i++) {
+                    if (stopFinding) { addLog('Поиск остановлен пользователем', 'warning'); interrupted = true; break; }
+                    const name = currentNames[i];
+                    const pct = Math.round(((i) / total) * 100 * 0.9) + 10;
+                    updateProgress(Math.min(95, Math.max(15, pct)), `Поиск сайтов... ${i + 1}/${total}`);
+                    try {
+                        const resp = await fetch('http://127.0.0.1:8001/find-websites', {
+                            method: 'POST',
+                            headers: {
+                                'Content-Type': 'application/json; charset=utf-8',
+                                'Accept': 'application/json; charset=utf-8',
+                            },
+                            body: JSON.stringify({ location, names: [name] })
+                        });
+                        if (!resp.ok) {
+                            const txt = await resp.text().catch(() => '');
+                            addLog(`Ошибка ${i + 1}: HTTP ${resp.status}: ${txt}`, 'warning');
+                            interrupted = true;
+                        } else {
+                            const data = await resp.json();
+                            // Выведем backend-логи (включая YANDEX DBG)
+                            try {
+                                if (Array.isArray(data.logs)) {
+                                    for (const line of data.logs.slice(-40)) {
+                                        const t = (typeof line === 'string' ? line : JSON.stringify(line));
+                                        const type = t.includes('⚠️') || t.includes('Ошибка') ? 'warning' : (t.includes('✅') || t.includes('🟢') ? 'success' : 'info');
+                                        addLog(t, type);
+                                    }
+                                }
+                            } catch {}
+                            const items = Array.isArray(data.items) ? data.items : [];
+                            aggregated = aggregated.concat(items);
+                            currentWebsiteItems = aggregated;
+                        }
+                        showWebsites(currentWebsiteItems);
+                    } catch (e) {
+                        addLog(`Ошибка ${i + 1}: ${e.message}`, 'warning');
+                    }
+                }
+                updateProgress(100, 'Готово!');
+                setTimeout(hideProgress, 800);
+                const okCount = (currentWebsiteItems || []).filter(i => (String(i.website||'').trim().length>0)).length;
+                const missCount = (currentWebsiteItems || []).length - okCount;
+                const summaryEl = document.getElementById('websitesSummary');
+                if (interrupted) {
+                    addLog(`Поиск сайтов прерван. Найдено: ${okCount}, не найдено: ${missCount}`, 'warning');
+                    if (summaryEl) {
+                        summaryEl.textContent = `Поиск сайтов прерван: найдено ${okCount}, не найдено ${missCount}.`;
+                        summaryEl.style.display = 'block';
+                    }
+                } else {
+                    addLog(`Поиск сайтов завершён. Найдено: ${okCount}, не найдено: ${missCount}`, 'success');
+                    if (summaryEl) {
+                        summaryEl.textContent = `Поиск сайтов завершён: найдено ${okCount}, не найдено ${missCount}.`;
+                        summaryEl.style.display = 'block';
+                    }
+                }
+                const exportWebsitesExcelBtn = document.getElementById('exportWebsitesExcelBtn');
+                if (exportWebsitesExcelBtn) exportWebsitesExcelBtn.disabled = (currentWebsiteItems||[]).length === 0;
+            } catch (e) {
+                addLog(`Ошибка поиска сайтов: ${e.message}`, 'error');
+                updateProgress(0, 'Произошла ошибка');
+                setTimeout(hideProgress, 1200);
+            }
+            finally {
+                const findBtn = document.getElementById('findWebsitesBtn');
+                const stopBtn = document.getElementById('stopWebsitesBtn');
+                if (findBtn) findBtn.disabled = false;
+                if (stopBtn) stopBtn.disabled = true;
+            }
+        }
+
+        function stopFindingWebsites() {
+            stopFinding = true;
+            addLog('Останавливаю поиск сайтов...', 'warning');
+        }
+
+        function showWebsites(items) {
+            const section = document.getElementById('websitesSection');
+            if (!Array.isArray(items)) items = [];
+            const tbody = document.getElementById('websitesBody');
+            tbody.innerHTML = '';
+            items.forEach((it) => {
+                const name = String(it.name || '').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+                const site = String(it.website || '').trim();
+                const siteCell = site ? `<a href="${site}" target="_blank" rel="noopener noreferrer">${site}</a>` : 'сайт не найден';
+                const tr = document.createElement('tr');
+                tr.innerHTML = `<td>${name || '-'}</td><td>${siteCell}</td>`;
+                tbody.appendChild(tr);
+            });
+            section.style.display = 'block';
+            // единая кнопка экспорта активируется при наличии любых строк
+            const exportBtn = document.getElementById('exportWebsitesExcelBtn');
+            if (exportBtn) exportBtn.disabled = items.length === 0;
+        }
+
+        function exportWebsitesCsv() {
+            try {
+                const items = Array.isArray(currentWebsiteItems) ? currentWebsiteItems : [];
+                if (items.length === 0) {
+                    showModal('Нет данных', 'Сначала выполните поиск сайтов.');
+                    return;
+                }
+                const bom = '\ufeff';
+                const header = 'name,website\n';
+                const esc = (v) => {
+                    let s = String(v == null ? '' : v);
+                    if (/[",\n]/.test(s)) s = '"' + s.replace(/"/g, '""') + '"';
+                    return s;
+                };
+                const rows = items.map(it => `${esc(it.name||'')},${esc(it.website||'')}`).join('\n');
+                const csv = bom + header + rows + '\n';
+                const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+                const dlUrl = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = dlUrl;
+                a.download = `сайты_${currentLocation || 'город'}_${new Date().toISOString().split('T')[0]}.csv`;
+                document.body.appendChild(a);
+                a.click();
+                URL.revokeObjectURL(dlUrl);
+                document.body.removeChild(a);
+                addLog('Экспорт сайтов завершён (CSV)', 'success');
+            } catch (e) {
+                addLog(`Ошибка экспорта сайтов: ${e.message}`, 'error');
             }
         }
 
