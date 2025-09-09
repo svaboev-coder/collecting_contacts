@@ -1,4 +1,5 @@
 import requests
+import json
 from bs4 import BeautifulSoup
 import re
 from typing import Optional, Dict, Any, List, Tuple
@@ -100,12 +101,121 @@ class WebScraper:
         except Exception as e:
             logger.error(f"Ошибка получения заголовка {url}: {e}")
             return ''
-    
+
+    def get_raw_html(self, url: str) -> Optional[str]:
+        """Возвращает сырой HTML страницы без очистки."""
+        try:
+            self.session.headers.update({
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+                'Accept-Language': 'ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7',
+                'Referer': url
+            })
+            resp = self.session.get(url, timeout=15)
+            resp.raise_for_status()
+            resp.encoding = resp.apparent_encoding
+            return resp.text
+        except Exception as e:
+            logger.error(f"Ошибка получения HTML {url}: {e}")
+            return None
+
     def extract_emails(self, text: str) -> list:
         """Извлечение email адресов из текста"""
-        email_pattern = r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b'
+        email_pattern = r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b'
         emails = re.findall(email_pattern, text)
         return list(set(emails))  # Убираем дубликаты
+
+    def extract_emails_from_html(self, html: str) -> list:
+        """Извлечение email из mailto и JSON-LD в HTML."""
+        if not html:
+            return []
+        emails: set = set()
+        try:
+            soup = BeautifulSoup(html, 'html.parser')
+            # mailto:
+            for a in soup.find_all('a', href=True):
+                href = a.get('href') or ''
+                if href.lower().startswith('mailto:'):
+                    addr = href.split(':', 1)[1]
+                    addr = addr.split('?', 1)[0]
+                    from urllib.parse import unquote as _unquote
+                    addr = _unquote(addr)
+                    addr = addr.strip()
+                    if addr:
+                        emails.add(addr)
+            # JSON-LD blocks
+            for sc in soup.find_all('script'):
+                t = (sc.get('type') or '').lower()
+                if 'ld+json' in t and sc.string:
+                    try:
+                        data = json.loads(sc.string)
+                    except Exception:
+                        continue
+                    # рекурсивный обход
+                    stack = [data]
+                    while stack:
+                        node = stack.pop()
+                        if isinstance(node, dict):
+                            for k, v in node.items():
+                                if isinstance(v, (dict, list)):
+                                    stack.append(v)
+                                elif isinstance(v, str) and '@' in v:
+                                    for m in re.findall(r'[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}', v):
+                                        emails.add(m)
+                        elif isinstance(node, list):
+                            for it in node:
+                                stack.append(it)
+        except Exception as e:
+            logger.warning(f"extract_emails_from_html failed: {e}")
+        return list(emails)
+
+    def extract_postal_addresses_from_jsonld(self, html: str) -> list:
+        """Достаёт адреса из JSON-LD (schema.org PostalAddress) и склеивает в строку."""
+        if not html:
+            return []
+        out: list = []
+        try:
+            soup = BeautifulSoup(html, 'html.parser')
+            for sc in soup.find_all('script'):
+                t = (sc.get('type') or '').lower()
+                if 'ld+json' not in t or not sc.string:
+                    continue
+                try:
+                    data = json.loads(sc.string)
+                except Exception:
+                    continue
+                stack = [data]
+                while stack:
+                    node = stack.pop()
+                    if isinstance(node, dict):
+                        atype = (node.get('@type') or node.get('type') or '')
+                        if isinstance(atype, list):
+                            atype = ' '.join(atype)
+                        if isinstance(atype, str) and 'postaladdress' in atype.lower():
+                            parts = []
+                            for key in ['postalCode','addressCountry','addressRegion','addressLocality','streetAddress']:
+                                val = node.get(key)
+                                if isinstance(val, str) and val.strip():
+                                    parts.append(val.strip())
+                            addr = ', '.join(parts)
+                            if addr:
+                                out.append(addr)
+                        for v in node.values():
+                            if isinstance(v, (dict, list)):
+                                stack.append(v)
+                    elif isinstance(node, list):
+                        for it in node:
+                            stack.append(it)
+        except Exception as e:
+            logger.warning(f"extract_postal_addresses_from_jsonld failed: {e}")
+        # дедуп
+        uniq = []
+        seen = set()
+        for a in out:
+            if a in seen:
+                continue
+            seen.add(a)
+            uniq.append(a)
+        return uniq
     
     def extract_phones(self, text: str) -> list:
         """Извлечение телефонных номеров из текста"""
@@ -139,19 +249,75 @@ class WebScraper:
     
     def extract_addresses(self, text: str) -> list:
         """Извлечение адресов из текста"""
-        # Простой паттерн для российских адресов
+        # Уточнённые паттерны для российских адресов (улица/дом), допускаем префиксы города/края
         address_patterns = [
-            r'[А-Яа-я\s]+,\s*[А-Яа-я\s]+,\s*[А-Яа-я\s]+,\s*\d+',  # Город, улица, дом
-            r'[А-Яа-я\s]+,\s*[А-Яа-я\s]+,\s*\d+',  # Улица, дом
-            r'[А-Яа-я\s]+,\s*\d+',  # Улица, дом
+            r'(?:г\.?\s*[А-ЯЁа-яё\-\s]+,\s*)?(?:[А-ЯЁа-яё\-\s]+,\s*)?(?:ул\.|улица|просп\.|проспект|пер\.|переулок|шоссе|наб\.|набережная|бульвар|б\-р|проезд)\s+[А-ЯЁа-яё0-9\-\s]+,?\s*(?:д\.|дом)?\s*\d+[А-Яа-яA-Za-z0-9\-\/]*',
+            r'(?:край|область|респ\.|республика|г\.|город)\s*[А-ЯЁа-яё\-\s]+,\s*[А-ЯЁа-яё\-\s]+,\s*\d+[А-Яа-яA-Za-z0-9\-\/]*',
         ]
         
-        addresses = []
+        addresses: list = []
         for pattern in address_patterns:
-            found = re.findall(pattern, text)
-            addresses.extend(found)
+            try:
+                found = re.findall(pattern, text)
+                for a in found:
+                    s = a.strip()
+                    if '@' in s:
+                        continue
+                    if 8 <= len(s) <= 200:
+                        addresses.append(s)
+            except Exception:
+                continue
         
-        return list(set(addresses))
+        # Убираем дубликаты, сохраняя порядок
+        uniq = []
+        seen = set()
+        for a in addresses:
+            if a in seen:
+                continue
+            seen.add(a)
+            uniq.append(a)
+        return uniq
+
+    def extract_addresses_from_html(self, html: str) -> list:
+        """Ищет адреса в HTML рядом с метками 'Адрес'/'Address'."""
+        if not html:
+            return []
+        try:
+            soup = BeautifulSoup(html, 'html.parser')
+            texts = []
+            # элементы, где явно встречается слово 'Адрес'
+            cand = soup.find_all(string=lambda t: isinstance(t, str) and 'адрес' in t.lower())
+            for t in cand:
+                # текущий и соседние элементы
+                node = t.parent
+                ctx = [node.get_text(" ", strip=True)]
+                prev = node.find_previous(string=True)
+                if prev:
+                    ctx.append(prev.strip())
+                nxt = node.find_next(string=True)
+                if nxt:
+                    ctx.append(nxt.strip())
+                for piece in ctx:
+                    if piece and len(piece) <= 240:
+                        texts.append(piece)
+            # Если нет меток — ничего не отдаём (чтобы не ловить мусор)
+            acc = []
+            for snippet in texts:
+                # вытащим из кусочков по regex
+                for a in self.extract_addresses(snippet):
+                    acc.append(a)
+            # Дедуп
+            uniq = []
+            seen = set()
+            for a in acc:
+                if a in seen:
+                    continue
+                seen.add(a)
+                uniq.append(a)
+            return uniq
+        except Exception as e:
+            logger.warning(f"extract_addresses_from_html failed: {e}")
+            return []
     
     def clean_text(self, text: str) -> str:
         """Очистка текста от лишних символов"""
@@ -161,8 +327,9 @@ class WebScraper:
         # Удаление лишних пробелов
         text = re.sub(r'\s+', ' ', text)
         
-        # Удаление специальных символов
-        text = re.sub(r'[^\w\s\-.,!?()]', '', text)
+        # Удаление специальных символов, но сохраняем символы важные для e-mail/URL: @ + : / ;
+        # Также сохраняем дефис/точку/скобки/запятые/воскл/вопр для адресов
+        text = re.sub(r'[^\w\s@+\-\.,!?():/;]', '', text)
         
         # Ограничение длины
         if len(text) > 5000:
@@ -176,15 +343,40 @@ class ContactExtractor:
     def __init__(self):
         self.scraper = WebScraper()
     
+    def _normalize_email_words(self, text: str) -> str:
+        """Заменяет обфускации вида (at)/(dot)/[at]/[dot]/'собака'/'точка' на @ и ."""
+        if not text:
+            return ''
+        s = text
+        # унификация пробелов
+        s = re.sub(r'\s+', ' ', s)
+        # английские варианты
+        patterns = [
+            (r'\b\(\s*at\s*\)|\[\s*at\s*\]|\s+at\s+|\s*\{\s*at\s*\}\s*', '@'),
+            (r'\b\(\s*dot\s*\)|\[\s*dot\s*\]|\s+dot\s+|\s*\{\s*dot\s*\}\s*', '.'),
+        ]
+        # русские варианты
+        patterns += [
+            (r'\bсобак[а-я]\b', '@'),
+            (r'\bточк[а-я]\b', '.'),
+        ]
+        for pat, repl in patterns:
+            try:
+                s = re.sub(pat, repl, s, flags=re.IGNORECASE)
+            except Exception:
+                pass
+        return s
+    
     def extract_contacts_from_text(self, text: str) -> Dict[str, Any]:
         """Извлечение всех типов контактов из текста"""
         if not text:
             return {}
         
         cleaned_text = self.scraper.clean_text(text)
+        normalized_text = self._normalize_email_words(cleaned_text)
         
         return {
-            'emails': self.scraper.extract_emails(cleaned_text),
+            'emails': self.scraper.extract_emails(normalized_text),
             'phones': self.scraper.extract_phones(cleaned_text),
             'coordinates': self.scraper.extract_coordinates(cleaned_text),
             'addresses': self.scraper.extract_addresses(cleaned_text),
@@ -194,9 +386,27 @@ class ContactExtractor:
     def extract_contacts_from_url(self, url: str) -> Dict[str, Any]:
         """Извлечение контактов с веб-страницы"""
         content = self.scraper.get_page_content(url)
-        if content:
-            return self.extract_contacts_from_text(content)
-        return {}
+        html = self.scraper.get_raw_html(url) or ''
+        data_from_text = self.extract_contacts_from_text(content or '') if content else {}
+        emails_from_html = self.scraper.extract_emails_from_html(html)
+        addrs_from_html = self.scraper.extract_addresses_from_html(html)
+        addrs_from_jsonld = self.scraper.extract_postal_addresses_from_jsonld(html)
+        # объединяем
+        emails = set(data_from_text.get('emails', [])) if data_from_text else set()
+        for e in emails_from_html:
+            emails.add(e)
+        addresses = list(data_from_text.get('addresses', [])) if data_from_text else []
+        # приоритет адресов из JSON-LD и HTML-меток
+        for a in addrs_from_jsonld:
+            if a not in addresses:
+                addresses.insert(0, a)
+        for a in addrs_from_html:
+            if a not in addresses:
+                addresses.insert(0, a)
+        result = dict(data_from_text) if data_from_text else {}
+        result['emails'] = list(emails)
+        result['addresses'] = addresses
+        return result
     
     def merge_contact_data(self, data_list: list) -> Dict[str, Any]:
         """Объединение данных из нескольких источников"""
@@ -556,6 +766,129 @@ class YandexOrgSearch:
             self.last_debug.append(f"error: {e}")
             return None
 
+    def find_contacts(self, name: str, location: str) -> Tuple[Optional[str], Optional[str], List[str]]:
+        """Ищет контакты (email и адрес) напрямую в карточках Яндекс организаций."""
+        logs: List[str] = []
+        email = None
+        address = None
+        
+        if not self._is_enabled():
+            logs.append("YANDEX API KEY missing")
+            return email, address, logs
+            
+        try:
+            queries = [f"{name} {location}"]
+            expanded = self._expand_abbreviations(name)
+            if expanded.lower() != (name or '').lower():
+                queries.append(f"{expanded} {location}")
+
+            norm_loc = ''.join(ch.lower() for ch in (location or '') if ch.isalnum() or ch.isspace()).strip()
+            name_tokens = self._name_tokens(expanded)
+            bbox = self._get_bbox(location)
+            
+            logs.append(f"Поиск контактов для '{name}' в '{location}'")
+
+            for q in queries:
+                params = {
+                    'apikey': self.api_key,
+                    'text': q,
+                    'type': 'biz',
+                    'lang': 'ru_RU',
+                    'results': 30,
+                }
+                if bbox:
+                    params['bbox'] = bbox
+                    params['rspn'] = 1
+                    
+                logs.append(f"Запрос: {q}")
+                try:
+                    resp = self.session.get(self.base_url, params=params, timeout=15)
+                    resp.raise_for_status()
+                except Exception as e:
+                    logs.append(f"Ошибка запроса: {e}")
+                    continue
+                    
+                data = resp.json()
+                feats = data.get('features') or []
+                logs.append(f"Найдено организаций: {len(feats)}")
+                
+                for f in feats:
+                    props = (f.get('properties') or {})
+                    meta = (props.get('CompanyMetaData') or {})
+                    
+                    # Проверяем соответствие организации
+                    addr = (meta.get('address') or '').lower()
+                    norm_addr = ''.join(ch for ch in addr if ch.isalnum() or ch.isspace()).strip()
+                    meta_name = (meta.get('name') or props.get('name') or '').lower()
+                    
+                    good_by_location = bool(norm_loc and norm_loc in norm_addr)
+                    good_by_name = any(t in meta_name for t in name_tokens) if name_tokens else False
+                    
+                    if good_by_location or good_by_name:
+                        logs.append(f"Найдена подходящая организация: {meta.get('name', 'Без названия')}")
+                        
+                        # Извлекаем адрес
+                        if addr:
+                            address = addr
+                            logs.append(f"Адрес из Яндекс: {address}")
+                        
+                        # Ищем email в CompanyMetaData
+                        email_fields = ['email', 'Email', 'EMAIL', 'mail', 'Mail', 'MAIL', 'contact', 'Contact', 'CONTACT']
+                        
+                        # Сначала проверим основные поля
+                        for field in email_fields:
+                            email_val = meta.get(field)
+                            if email_val and '@' in email_val:
+                                email = email_val.strip()
+                                logs.append(f"Email из Яндекс ({field}): {email}")
+                                break
+                        
+                        # Если не нашли, проверим все поля на наличие @
+                        if not email:
+                            logs.append("Проверяем все поля CompanyMetaData на наличие email...")
+                            for key, value in meta.items():
+                                if isinstance(value, str) and '@' in value and '.' in value:
+                                    # Проверяем, что это похоже на email
+                                    if len(value.split('@')) == 2 and len(value.split('@')[1].split('.')) >= 2:
+                                        email = value.strip()
+                                        logs.append(f"Email найден в поле '{key}': {email}")
+                                        break
+                        
+                        # Если все еще не нашли, проверим другие части ответа
+                        if not email:
+                            logs.append("Проверяем другие части ответа Яндекс...")
+                            # Проверяем properties
+                            for key, value in props.items():
+                                if isinstance(value, str) and '@' in value and '.' in value:
+                                    if len(value.split('@')) == 2 and len(value.split('@')[1].split('.')) >= 2:
+                                        email = value.strip()
+                                        logs.append(f"Email найден в properties['{key}']: {email}")
+                                        break
+                        
+                        # Если все еще не нашли, выведем все доступные поля для отладки
+                        if not email:
+                            logs.append("Доступные поля в CompanyMetaData:")
+                            for key, value in meta.items():
+                                if isinstance(value, str) and len(value) < 100:  # Только короткие строки
+                                    logs.append(f"  {key}: {value}")
+                            
+                            logs.append("Доступные поля в properties:")
+                            for key, value in props.items():
+                                if isinstance(value, str) and len(value) < 100:  # Только короткие строки
+                                    logs.append(f"  {key}: {value}")
+                        
+                        # Если нашли хотя бы один контакт - возвращаем
+                        if email or address:
+                            logs.append(f"Контакты найдены: email={email}, address={address}")
+                            return email, address, logs
+                            
+            logs.append("Контакты в Яндекс карточках не найдены")
+            return email, address, logs
+            
+        except Exception as e:
+            logs.append(f"Ошибка поиска контактов: {e}")
+            return email, address, logs
+
 
 # Глобальный экземпляр Яндекс‑поиска
 yandex_search = YandexOrgSearch()
@@ -731,3 +1064,333 @@ class NameFinder:
 
 # Глобальный экземпляр для поиска названий
 name_finder = NameFinder()
+
+
+# =========================
+# Контактный краулер сайта
+# =========================
+
+class TextExtractorAgent:
+    """Агент для извлечения чистого текста с сайта."""
+    
+    def __init__(self):
+        self.scraper = scraper
+    
+    def extract_text_from_site(self, base_url: str, max_pages: int = 12, max_depth: int = 2) -> Tuple[str, List[str]]:
+        """Извлекает весь текстовый контент с сайта."""
+        logs: List[str] = []
+        all_text_parts = []
+        
+        try:
+            if not base_url or not base_url.startswith(('http://', 'https://')):
+                logs.append("⚠️ Пустой или некорректный URL сайта")
+                return "", logs
+                
+            parsed = urlparse(base_url)
+            base_netloc = parsed.netloc
+            
+            # Очередь URL для обхода
+            from collections import deque
+            queue = deque()
+            visited = set()
+
+            def enqueue(u: str, depth: int):
+                if (u, depth) in visited:
+                    return
+                if not self._same_scope(base_netloc, u):
+                    return
+                visited.add((u, depth))
+                queue.append((u, depth))
+
+            # Стартовые точки: главная и типичные контактные страницы
+            base = f"{parsed.scheme}://{parsed.netloc}"
+            start_candidates = [base_url, urljoin(base, '/contacts'), urljoin(base, '/contact'), urljoin(base, '/контакты'), urljoin(base, '/about')]
+            seen_seed = set()
+            for s in start_candidates:
+                if s in seen_seed:
+                    continue
+                seen_seed.add(s)
+                enqueue(s, 0)
+
+            pages_scanned = 0
+            while queue and pages_scanned < max_pages:
+                url, depth = queue.popleft()
+                pages_scanned += 1
+                logs.append(f"📄 Извлекаем текст: {url} (глубина {depth})")
+                
+                text = self.scraper.get_page_content(url) or ''
+                if text:
+                    all_text_parts.append(text)
+                    logs.append(f"✅ Получено {len(text)} символов с {url}")
+
+                # Расширяем обход
+                if depth < max_depth:
+                    links = self.scraper.get_links(url, max_links=20)
+                    # приоритезируем контактные
+                    links_sorted = sorted(links, key=lambda l: (0 if self._is_contact_like(urlparse(l).path) else 1, len(l)))
+                    for l in links_sorted:
+                        if self._same_scope(base_netloc, l):
+                            enqueue(l, depth + 1)
+
+            # Объединяем весь текст
+            combined_text = '\n\n'.join(all_text_parts)
+            logs.append(f"📊 Итого извлечено: {len(combined_text)} символов с {pages_scanned} страниц")
+            return combined_text, logs
+            
+        except Exception as e:
+            logs.append(f"❌ Ошибка извлечения текста: {e}")
+            return "", logs
+    
+    def _root_domain(self, host: str) -> str:
+        try:
+            netloc = host.lower()
+            if netloc.startswith('www.'):
+                netloc = netloc[4:]
+            parts = netloc.split('.')
+            if len(parts) >= 2:
+                return '.'.join(parts[-2:])
+            return netloc
+        except Exception:
+            return ''
+
+    def _same_scope(self, base_netloc: str, candidate_url: str) -> bool:
+        try:
+            cand = urlparse(candidate_url)
+            if cand.scheme not in ('http', 'https'):
+                return False
+            base_rd = self._root_domain(base_netloc)
+            cand_rd = self._root_domain(cand.netloc)
+            return bool(base_rd and cand_rd and base_rd == cand_rd)
+        except Exception:
+            return False
+
+    def _is_contact_like(self, url_path: str) -> bool:
+        low = (url_path or '').lower()
+        keys = ['contact', 'contacts', 'kontact', 'kontakty', 'контакт', 'контакты', 'about', 'о-компании', 'o-kompanii', 'o-kompany', 'о_компании', 'o-nas', 'о нас']
+        return any(k in low for k in keys)
+
+
+class ContactFinderAgent:
+    """Агент для поиска контактов в тексте с помощью LLM."""
+    
+    def __init__(self):
+        pass
+    
+    def find_contacts_in_text(self, proxy_client, text: str, location: str) -> Tuple[Optional[str], Optional[str], str]:
+        """Ищет контакты в тексте с помощью LLM."""
+        logger.info(f"🤖 ContactFinderAgent: начинаем поиск в тексте длиной {len(text)} символов")
+        try:
+            if not proxy_client:
+                logger.warning("🤖 ContactFinderAgent: proxy_client отсутствует")
+                return None, None, ''
+            
+            # Разбиваем текст на части для лучшего анализа
+            text_length = len(text)
+            if text_length <= 4000:
+                text_parts = [text]
+            else:
+                # Разбиваем на конец и начало (конец приоритетнее)
+                start_part = text[:4000]
+                end_part = text[-4000:] if text_length > 4000 else text[4000:]
+                text_parts = [end_part, start_part]
+            
+            prompt_template = (
+                "ТЫ ДОЛЖЕН НАЙТИ e-mail и адрес организации в тексте ниже. БУДЬ ОЧЕНЬ ВНИМАТЕЛЬНЫМ!\n"
+                "ИНСТРУКЦИИ:\n"
+                "1. ИЩИ email ВЕЗДЕ: в футере, контактах, формах, боковых панелях, даже в мелком тексте\n"
+                "2. ИЩИ адрес ВЕЗДЕ: полный адрес, город+регион, или просто город\n"
+                "3. Email должен содержать @ и домен (например: info@hotel.ru, booking@resort.com)\n"
+                "4. Адрес может быть любой длины: от 'г. Сочи' до полного адреса с улицей\n"
+                "5. Если видишь телефон рядом с контактами - игнорируй телефон, бери только email/адрес\n"
+                "6. Если данные слиты (например '79284134067Emailsvtkolom@yandex.ru') - раздели их\n"
+                "7. НЕ ПРОПУСКАЙ НИЧЕГО! Проверь весь текст внимательно\n"
+                "8. Если нашел хотя бы один контакт - обязательно верни его\n"
+                "\n"
+                "Верни строго JSON: {{\"email\": \"найденный_email\", \"address\": \"найденный_адрес\"}}\n"
+                "Если ничего не найдено: {{\"email\": \"\", \"address\": \"\"}}\n\n"
+                "ТЕКСТ ДЛЯ АНАЛИЗА:\n{text_part}"
+            )
+            
+            import asyncio as _asyncio
+            
+            logger.info(f"🤖 ContactFinderAgent: разбили текст на {len(text_parts)} частей")
+            
+            # Анализируем каждую часть текста
+            logger.info(f"🤖 ContactFinderAgent: начинаем цикл анализа {len(text_parts)} частей")
+            for i, text_part in enumerate(text_parts):
+                logger.info(f"🤖 ContactFinderAgent: обрабатываем часть {i+1}/{len(text_parts)}, длина: {len(text_part)} символов")
+                prompt = prompt_template.format(text_part=text_part)
+                logger.info(f"🤖 Отправляем запрос к LLM (часть {i+1}/{len(text_parts)})...")
+                try:
+                    # Используем существующий ProxyAPIClient
+                    import asyncio as _asyncio
+                    
+                    logger.info(f"🤖 Отправляем запрос к LLM через ProxyAPIClient...")
+                    resp = _asyncio.run(proxy_client.chat_completion(
+                        model='claude-3-5-sonnet-20240620',
+                        messages=[{'role': 'user', 'content': prompt}],
+                        max_tokens=500,
+                        temperature=0.1
+                    ))
+                    logger.info(f"🤖 LLM запрос выполнен успешно")
+                        
+                except Exception as e:
+                    logger.warning(f"Ошибка LLM запроса: {e}")
+                    continue
+                content = resp["choices"][0]["message"]["content"] if isinstance(resp, dict) else ""
+                logger.info(f"🤖 LLM ответ: {content[:200]}...")
+                
+                try:
+                    logger.info(f"🤖 Пытаемся распарсить JSON: {content[:100]}...")
+                    data = json.loads(content)
+                    raw_email = (data.get('email') or '').strip()
+                    raw_addr = (data.get('address') or '').strip()
+                    
+                    # Если нашли контакты в этой части - возвращаем их
+                    if raw_email or raw_addr:
+                        # Санитизация
+                        email = None
+                        if raw_email:
+                            ems = contact_extractor.scraper.extract_emails(raw_email)
+                            email = ems[0] if ems else None
+                        address = None
+                        if raw_addr:
+                            ads = contact_extractor.scraper.extract_addresses(raw_addr)
+                            address = ads[0] if ads else (raw_addr if len(raw_addr) >= 3 else None)
+                        
+                        # Добавляем информацию о том, в какой части нашли
+                        part_info = f" (часть {i+1})" if len(text_parts) > 1 else ""
+                        content_with_info = content + part_info
+                        
+                        return (email or None), (address or None), content_with_info
+                except Exception:
+                    continue
+            
+            # Если ни в одной части не нашли контакты
+            return None, None, "Контакты не найдены ни в одной части текста"
+            
+        except Exception as e:
+            logger.warning(f"ContactFinderAgent error: {e}")
+            logger.warning(f"🤖 Полный текст для анализа: {text[:500]}...")
+            return None, None, ''
+
+
+class ContactsCrawler:
+    """Обход сайта и извлечение e-mail и почтовых адресов с использованием двух агентов.
+
+    - TextExtractorAgent извлекает чистый текст с сайта
+    - ContactFinderAgent ищет контакты в тексте с помощью LLM
+    """
+
+    def __init__(self):
+        self.text_extractor = TextExtractorAgent()
+        self.contact_finder = ContactFinderAgent()
+
+    def _root_domain(self, host: str) -> str:
+        try:
+            netloc = host.lower()
+            if netloc.startswith('www.'):
+                netloc = netloc[4:]
+            parts = netloc.split('.')
+            if len(parts) >= 2:
+                return '.'.join(parts[-2:])
+            return netloc
+        except Exception:
+            return ''
+
+    def _same_scope(self, base_netloc: str, candidate_url: str) -> bool:
+        try:
+            cand = urlparse(candidate_url)
+            if cand.scheme not in ('http', 'https'):
+                return False
+            base_rd = self._root_domain(base_netloc)
+            cand_rd = self._root_domain(cand.netloc)
+            return bool(base_rd and cand_rd and base_rd == cand_rd)
+        except Exception:
+            return False
+
+    def _is_contact_like(self, url_path: str) -> bool:
+        low = (url_path or '').lower()
+        keys = ['contact', 'contacts', 'kontact', 'kontakty', 'контакт', 'контакты', 'about', 'о-компании', 'o-kompanii', 'o-kompany', 'о_компании', 'o-nas', 'о нас']
+        return any(k in low for k in keys)
+
+
+
+    def extract_from_site(self,
+                          base_url: str,
+                          location: str,
+                          *,
+                          allow_subdomains: bool = True,
+                          max_pages: int = 12,
+                          max_depth: int = 2,
+                          proxy_client: Optional[object] = None) -> Tuple[Dict[str, str], List[str]]:
+        """Извлекает контакты с сайта используя двухагентную архитектуру."""
+        logs: List[str] = []
+        result: Dict[str, str] = {"email": "", "address": ""}
+        
+        try:
+            if not base_url or not base_url.startswith(('http://', 'https://')):
+                logs.append("⚠️ Пустой или некорректный URL сайта")
+                return result, logs
+            
+            logs.append(f"🚀 Начинаем извлечение контактов с {base_url}")
+            
+            # Шаг 0: Сначала пытаемся найти контакты в Яндекс карточках
+            logs.append("🔍 Этап 0: Поиск контактов в Яндекс карточках...")
+            yandex_email, yandex_address, yandex_logs = yandex_search.find_contacts(base_url, location)
+            logs.extend(yandex_logs)
+            
+            # Яндекс нашел адрес - сохраняем его, но продолжаем искать email через LLM
+            if yandex_address:
+                logs.append(f"✅ Адрес найден в Яндекс: {yandex_address}")
+                result['address'] = yandex_address
+            
+            # Если Яндекс нашел email - используем его, иначе ищем через LLM
+            if yandex_email:
+                logs.append(f"✅ Email найден в Яндекс: {yandex_email}")
+                result['email'] = yandex_email
+                # Если нашли и email и адрес в Яндекс - возвращаемся
+                if yandex_address:
+                    return result, logs
+            
+            # Шаг 1: TextExtractorAgent извлекает весь текст с сайта
+            logs.append("📄 Этап 1: Извлечение текста с сайта...")
+            extracted_text, extract_logs = self.text_extractor.extract_text_from_site(base_url, max_pages, max_depth)
+            logs.extend(extract_logs)
+            
+            if not extracted_text:
+                logs.append("❌ Не удалось извлечь текст с сайта")
+                return result, logs
+            
+            logs.append(f"✅ Текст извлечен: {len(extracted_text)} символов")
+            
+            # Шаг 2: ContactFinderAgent ищет email в тексте (если еще не найден)
+            if proxy_client and not result.get('email'):
+                logs.append("🤖 Этап 2: Поиск email в тексте с помощью LLM...")
+                logs.append(f"🤖 ProxyClient доступен: {type(proxy_client)}")
+                email, address, raw_response = self.contact_finder.find_contacts_in_text(proxy_client, extracted_text, location)
+                
+                # Используем email от LLM только если Яндекс его не нашел
+                if email:
+                    result['email'] = email
+                    logs.append(f"🤖 LLM нашел email: {email}")
+                else:
+                    logs.append("🤖 LLM не нашел email в тексте")
+                
+                if raw_response:
+                    logs.append(f"🤖 LLM ответ: {raw_response[:200]}")
+            elif result.get('email'):
+                logs.append("✅ Email уже найден в Яндекс, пропускаем LLM")
+            else:
+                logs.append("❌ ProxyClient недоступен, пропускаем LLM")
+            
+            logs.append(f"✅ Итог: email='{result['email'] or '—'}', address='{(result['address'] or '—')[:80]}'")
+            return result, logs
+            
+        except Exception as e:
+            logs.append(f"❌ Ошибка извлечения контактов: {e}")
+            return result, logs
+
+
+# Глобальный экземпляр краулера
+contacts_crawler = ContactsCrawler()

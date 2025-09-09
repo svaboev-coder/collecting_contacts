@@ -380,16 +380,19 @@
                 <div id="namesContainer" style="margin-top:10px;">
                     <p>Нет данных</p>
                 </div>
+                <div id="namesReadyNote" class="progress-text" style="margin-top:10px; display:none;">📊 Список названий готов</div>
             </div>
 
             <div class="results-section" id="websitesSection" style="display:none;">
-                <h3>🔗 Найденные официальные сайты</h3>
+                <h3>🔗 Организации: сайты и контакты</h3>
                 <div class="table-container">
                     <table class="results-table">
                         <thead>
                             <tr>
                                 <th>Название</th>
                                 <th>Официальный сайт</th>
+                                <th>Email</th>
+                                <th>Адрес</th>
                             </tr>
                         </thead>
                         <tbody id="websitesBody"></tbody>
@@ -398,7 +401,6 @@
             </div>
 
             <div class="export-section" id="namesExportSection" style="display:none;">
-                <h3>📊 Список названий готов</h3>
                 <div id="websitesSummary" class="progress-text" style="margin:6px 0 10px 0; display:none;"></div>
                 <div style="display:flex; gap:10px; align-items:center;">
                     <button id="namesExportBtn" class="btn btn-secondary btn-small" onclick="exportNamesWithSitesExcel()">
@@ -407,7 +409,10 @@
                     <button id="findWebsitesBtn" class="btn btn-primary btn-small" onclick="findWebsitesSequential()">
                         🔗 Найти сайты
                     </button>
-                    <button id="stopWebsitesBtn" class="btn btn-secondary btn-small" onclick="stopFindingWebsites()" disabled>
+                    <button id="extractContactsBtn" class="btn btn-primary btn-small" onclick="extractContactsSequential()" style="display:none;">
+                        📧 Извлечь контакты
+                    </button>
+                    <button id="stopWebsitesBtn" class="btn btn-secondary btn-small" onclick="stopAllProcesses()" disabled>
                         ⛔ Стоп
                     </button>
                 </div>
@@ -439,6 +444,35 @@
         let currentNames = [];
         let currentWebsiteItems = [];
         let stopFinding = false;
+        let currentContacts = []; // сопоставление name -> { website, email, address }
+        let activeController = null; // AbortController для отмены активного fetch
+        let activeProcess = null;    // 'names' | 'websites' | 'contacts' | null
+
+        function beginProcess(kind) {
+            activeProcess = kind;
+            stopFinding = false;
+            if (activeController) {
+                try { activeController.abort(); } catch {}
+            }
+            activeController = null;
+            const stopBtn = document.getElementById('stopWebsitesBtn');
+            if (stopBtn) stopBtn.disabled = false;
+            // Деактивируем кнопку экспорта во время активного процесса
+            const exportBtn = document.getElementById('namesExportBtn');
+            if (exportBtn) exportBtn.disabled = true;
+        }
+        function endProcess() {
+            activeProcess = null;
+            if (activeController) {
+                try { activeController.abort(); } catch {}
+            }
+            activeController = null;
+            const stopBtn = document.getElementById('stopWebsitesBtn');
+            if (stopBtn) stopBtn.disabled = true;
+            // Реактивируем кнопку экспорта после завершения процесса
+            const exportBtn = document.getElementById('namesExportBtn');
+            if (exportBtn) exportBtn.disabled = false;
+        }
 
         // Модальное окно
         function showModal(title, message) {
@@ -473,10 +507,14 @@
         function showProgress() {
             document.getElementById('progressSection').style.display = 'block';
             document.getElementById('exportSection').style.display = 'none';
+            const stopBtn = document.getElementById('stopWebsitesBtn');
+            if (stopBtn) stopBtn.disabled = false;
         }
 
         function hideProgress() {
             document.getElementById('progressSection').style.display = 'none';
+            const stopBtn = document.getElementById('stopWebsitesBtn');
+            if (stopBtn) stopBtn.disabled = true;
         }
 
         function showResults() {
@@ -496,6 +534,7 @@
         function clearWebsites() {
             try {
                 currentWebsiteItems = [];
+                currentContacts = [];
                 const tbody = document.getElementById('websitesBody');
                 if (tbody) tbody.innerHTML = '';
                 const section = document.getElementById('websitesSection');
@@ -638,13 +677,16 @@
                 clearWebsites();
                 showProgress();
                 updateProgress(15, 'Подготовка к поиску названий...');
+                beginProcess('names');
+                activeController = new AbortController();
                 const resp = await fetch('http://127.0.0.1:8001/list-names', {
                     method: 'POST',
                     headers: {
                         'Content-Type': 'application/json; charset=utf-8',
                         'Accept': 'application/json; charset=utf-8',
                     },
-                    body: JSON.stringify({ location })
+                    body: JSON.stringify({ location }),
+                    signal: activeController.signal
                 });
                 if (!resp.ok) {
                     try { hideProgress(); } catch {}
@@ -672,7 +714,6 @@
                     addLog(`Получено названий: ${names.length}`, 'success');
                     document.getElementById('namesExportSection').style.display = 'block';
                     // таблица сайтов пока скрыта, до старта поиска сайтов
-                    if (exportBtn) exportBtn.disabled = false;
                 }
                 updateProgress(100, 'Готово!');
                 setTimeout(hideProgress, 800);
@@ -680,15 +721,26 @@
                 addLog(`Ошибка получения списка названий: ${e.message}`, 'error');
                 updateProgress(0, 'Произошла ошибка');
                 setTimeout(hideProgress, 1200);
+            } finally {
+                endProcess();
+                // Активируем кнопку экспорта только если есть данные
+                const exportBtn = document.getElementById('namesExportBtn');
+                if (exportBtn && Array.isArray(currentNames) && currentNames.length > 0) {
+                    exportBtn.disabled = false;
+                }
+                activeController = null;
+                isCollecting = false;
             }
         }
 
         function showNames(names) {
             const section = document.getElementById('namesSection');
             const container = document.getElementById('namesContainer');
+            const ready = document.getElementById('namesReadyNote');
             if (!Array.isArray(names) || names.length === 0) {
                 container.innerHTML = '<p>Ничего не найдено</p>';
                 section.style.display = 'block';
+                if (ready) ready.style.display = 'none';
                 return;
             }
             currentNames = names.slice();
@@ -700,6 +752,7 @@
             html += '</ol>';
             container.innerHTML = html;
             section.style.display = 'block';
+            if (ready) ready.style.display = 'block';
         }
 
         async function exportNamesToExcel() {
@@ -763,9 +816,24 @@
         async function exportNamesWithSitesExcel() {
             try {
                 // Если уже есть сайты — шлём POST для единого файла name+website
-                const items = Array.isArray(currentWebsiteItems) && currentWebsiteItems.length > 0
-                  ? currentWebsiteItems.map(it => ({ name: String(it.name||''), website: String(it.website||'') }))
-                  : (currentNames||[]).map(n => ({ name: String(n||''), website: '' }));
+                let items = [];
+                if (Array.isArray(currentWebsiteItems) && currentWebsiteItems.length > 0) {
+                    items = currentWebsiteItems.map(it => {
+                        // найдём контакты по имени
+                        let c = null;
+                        if (Array.isArray(currentContacts) && currentContacts.length > 0) {
+                            c = currentContacts.find(x => String(x.name||'') === String(it.name||'')) || null;
+                        }
+                        return {
+                            name: String(it.name||''),
+                            website: String(it.website||''),
+                            email: c && c.email ? String(c.email||'') : '',
+                            address: c && c.address ? String(c.address||'') : ''
+                        };
+                    });
+                } else {
+                    items = (currentNames||[]).map(n => ({ name: String(n||''), website: '', email: '', address: '' }));
+                }
                 const resp = await fetch('http://127.0.0.1:8001/export-names-excel', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json; charset=utf-8', 'Accept': 'application/json; charset=utf-8' },
@@ -809,17 +877,20 @@
                 if (findBtn) findBtn.disabled = true;
                 if (stopBtn) stopBtn.disabled = false;
                 stopFinding = false;
+                activeController = null;
                 showProgress();
                 const summary = document.getElementById('websitesSummary');
                 if (summary) { summary.style.display = 'none'; summary.textContent = ''; }
                 const total = currentNames.length;
                 let aggregated = [];
                 let interrupted = false;
+                activeProcess = 'websites';
                 for (let i = 0; i < total; i++) {
                     if (stopFinding) { addLog('Поиск остановлен пользователем', 'warning'); interrupted = true; break; }
                     const name = currentNames[i];
                     const pct = Math.round(((i) / total) * 100 * 0.9) + 10;
                     updateProgress(Math.min(95, Math.max(15, pct)), `Поиск сайтов... ${i + 1}/${total}`);
+                    activeController = new AbortController();
                     try {
                         const resp = await fetch('http://127.0.0.1:8001/find-websites', {
                             method: 'POST',
@@ -827,7 +898,8 @@
                                 'Content-Type': 'application/json; charset=utf-8',
                                 'Accept': 'application/json; charset=utf-8',
                             },
-                            body: JSON.stringify({ location, names: [name] })
+                            body: JSON.stringify({ location, names: [name] }),
+                            signal: activeController.signal
                         });
                         if (!resp.ok) {
                             const txt = await resp.text().catch(() => '');
@@ -852,6 +924,8 @@
                         showWebsites(currentWebsiteItems);
                     } catch (e) {
                         addLog(`Ошибка ${i + 1}: ${e.message}`, 'warning');
+                    } finally {
+                        activeController = null;
                     }
                 }
                 updateProgress(100, 'Готово!');
@@ -872,8 +946,12 @@
                         summaryEl.style.display = 'block';
                     }
                 }
-                const exportWebsitesExcelBtn = document.getElementById('exportWebsitesExcelBtn');
-                if (exportWebsitesExcelBtn) exportWebsitesExcelBtn.disabled = (currentWebsiteItems||[]).length === 0;
+                // Кнопка извлечения контактов доступна после завершения (в любом случае)
+                const extractBtn = document.getElementById('extractContactsBtn');
+                if (extractBtn) {
+                    extractBtn.style.display = 'inline-block';
+                    extractBtn.disabled = !(Array.isArray(currentWebsiteItems) && currentWebsiteItems.length > 0);
+                }
             } catch (e) {
                 addLog(`Ошибка поиска сайтов: ${e.message}`, 'error');
                 updateProgress(0, 'Произошла ошибка');
@@ -884,12 +962,27 @@
                 const stopBtn = document.getElementById('stopWebsitesBtn');
                 if (findBtn) findBtn.disabled = false;
                 if (stopBtn) stopBtn.disabled = true;
+                activeProcess = null;
+                activeController = null;
             }
         }
 
-        function stopFindingWebsites() {
-            stopFinding = true;
-            addLog('Останавливаю поиск сайтов...', 'warning');
+        function stopAllProcesses() {
+            try {
+                if (!activeProcess) {
+                    addLog('Нет активного процесса для остановки', 'warning');
+                    const stopBtn = document.getElementById('stopWebsitesBtn');
+                    if (stopBtn) stopBtn.disabled = true;
+                    return;
+                }
+                stopFinding = true;
+                if (activeController) {
+                    try { activeController.abort(); } catch {}
+                }
+                addLog('Останавливаю активный процесс...', 'warning');
+            } catch {}
+            const stopBtn = document.getElementById('stopWebsitesBtn');
+            if (stopBtn) stopBtn.disabled = true;
         }
 
         function showWebsites(items) {
@@ -901,14 +994,109 @@
                 const name = String(it.name || '').replace(/</g, '&lt;').replace(/>/g, '&gt;');
                 const site = String(it.website || '').trim();
                 const siteCell = site ? `<a href="${site}" target="_blank" rel="noopener noreferrer">${site}</a>` : 'сайт не найден';
+                // найдём контакты, если уже извлечены
+                let c = null;
+                if (Array.isArray(currentContacts) && currentContacts.length > 0) {
+                    c = currentContacts.find(x => String(x.name||'') === String(it.name||'')) || null;
+                }
+                const emailCell = c && c.email ? c.email : '';
+                const addrCell = c && c.address ? c.address : '';
                 const tr = document.createElement('tr');
-                tr.innerHTML = `<td>${name || '-'}</td><td>${siteCell}</td>`;
+                tr.innerHTML = `<td>${name || '-'}</td><td>${siteCell}</td><td>${emailCell || '—'}</td><td>${addrCell || '—'}</td>`;
                 tbody.appendChild(tr);
             });
             section.style.display = 'block';
             // единая кнопка экспорта активируется при наличии любых строк
             const exportBtn = document.getElementById('exportWebsitesExcelBtn');
             if (exportBtn) exportBtn.disabled = items.length === 0;
+        }
+
+        async function extractContactsSequential() {
+            try {
+                beginProcess('contacts');
+                if (!Array.isArray(currentWebsiteItems) || currentWebsiteItems.length === 0) {
+                    showModal('Нет сайтов', 'Сначала выполните поиск сайтов.');
+                    endProcess();
+                    return;
+                }
+                const location = currentLocation || '';
+                addLog('Начинаю извлечение контактов по найденным сайтам...', 'info');
+                // Очищаем предыдущее сообщение о поиске сайтов
+                const summaryEl = document.getElementById('websitesSummary');
+                if (summaryEl) {
+                    summaryEl.style.display = 'none';
+                    summaryEl.textContent = '';
+                }
+                // Показываем сообщение о начале процесса извлечения контактов
+                addLog('Процесс извлечения контактов запущен...', 'info');
+                showProgress();
+                const total = currentWebsiteItems.length;
+                const batchItems = currentWebsiteItems.map(it => ({ name: String(it.name||''), website: String(it.website||'') }));
+                // будем посылать пачками по 1 для визуального прогресса
+                currentContacts = [];
+                activeProcess = 'contacts';
+                stopFinding = false;
+                activeController = null;
+                let interrupted = false;
+                for (let i = 0; i < batchItems.length; i++) {
+                    if (stopFinding) { 
+                        addLog('Извлечение контактов остановлено пользователем', 'warning'); 
+                        interrupted = true;
+                        break; 
+                    }
+                    const one = [batchItems[i]];
+                    updateProgress(Math.round((i/Math.max(1,total))*90)+10, `Извлечение контактов... ${i+1}/${total}`);
+                    activeController = new AbortController();
+                    const resp = await fetch('http://127.0.0.1:8001/extract-contacts', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json; charset=utf-8', 'Accept': 'application/json; charset=utf-8' },
+                        body: JSON.stringify({ location, items: one }),
+                        signal: activeController.signal
+                    });
+                    if (!resp.ok) {
+                        const txt = await resp.text().catch(()=> '');
+                        addLog(`Ошибка извлечения контактов: HTTP ${resp.status}: ${txt}`, 'warning');
+                        continue;
+                    }
+                    const data = await resp.json();
+                    const got = Array.isArray(data.items) ? data.items : [];
+                    if (got.length > 0) {
+                        currentContacts.push(got[0]);
+                    }
+                    // обновим таблицу
+                    showWebsites(currentWebsiteItems);
+                    activeController = null;
+                }
+                updateProgress(100, 'Готово!');
+                setTimeout(hideProgress, 800);
+                const emailCount = currentContacts.filter(x => (x.email||'').trim()).length;
+                const addressCount = currentContacts.filter(x => (x.address||'').trim()).length;
+                const totalProcessed = currentContacts.length;
+                const emailNotFound = totalProcessed - emailCount;
+                const addressNotFound = totalProcessed - addressCount;
+                
+                if (interrupted) {
+                    addLog(`Извлечение контактов прервано: найдено email=${emailCount}, адресов=${addressCount}`, 'warning');
+                    if (summaryEl) {
+                        summaryEl.textContent = `Извлечение контактов прервано: найдено email=${emailCount}, адресов=${addressCount}. Не найдено: email=${emailNotFound}, адресов=${addressNotFound}.`;
+                        summaryEl.style.display = 'block';
+                    }
+                } else {
+                    addLog(`Извлечение контактов завершено: найдено email=${emailCount}, адресов=${addressCount}`, 'success');
+                    if (summaryEl) {
+                        summaryEl.textContent = `Извлечение контактов завершено: найдено email=${emailCount}, адресов=${addressCount}. Не найдено: email=${emailNotFound}, адресов=${addressNotFound}.`;
+                        summaryEl.style.display = 'block';
+                    }
+                }
+            } catch (e) {
+                addLog(`Ошибка извлечения контактов: ${e.message}`, 'error');
+                updateProgress(0, 'Произошла ошибка');
+                setTimeout(hideProgress, 1200);
+            } finally {
+                endProcess();
+                activeProcess = null;
+                activeController = null;
+            }
         }
 
         function exportWebsitesCsv() {

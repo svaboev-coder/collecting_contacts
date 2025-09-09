@@ -23,17 +23,17 @@ from pathlib import Path
 import tempfile
 try:
     # Запуск из папки backend (python backend/main.py)
-    from utils import contact_extractor, scraper, name_finder
+    from utils import contact_extractor, scraper, name_finder, contacts_crawler
     from agent import ContactAgent, WebsiteFinderAgent
     from proxy_api import ProxyAPIClient
 except ImportError:
     # Запуск как пакет (uvicorn backend.main:app)
-    from backend.utils import contact_extractor, scraper, name_finder
+    from backend.utils import contact_extractor, scraper, name_finder, contacts_crawler
     from backend.agent import ContactAgent, WebsiteFinderAgent
     from backend.proxy_api import ProxyAPIClient
 
 # Настройка логирования (принудительно + абсолютный путь)
-LOG_PATH = str((Path(__file__).resolve().parents[1] / 'backend_debug.log'))
+LOG_PATH = '/app/backend_debug.log'
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -185,10 +185,87 @@ class WebsiteFindResult(BaseModel):
 class WebsiteExportItem(BaseModel):
     name: str
     website: str
+    email: str = ""
+    address: str = ""
 
 class WebsiteExportRequest(BaseModel):
     location: str
     items: List[WebsiteExportItem]
+
+
+class ContactExtractItem(BaseModel):
+    name: str
+    website: str
+
+class ContactExtractedItem(BaseModel):
+    name: str
+    website: str
+    email: str
+    address: str
+
+class ContactExtractRequest(BaseModel):
+    location: str
+    items: List[ContactExtractItem]
+
+class ContactExtractResult(BaseModel):
+    location: str
+    items: List[ContactExtractedItem]
+    logs: List[str]
+    timestamp: str
+
+
+@app.post("/extract-contacts", response_model=ContactExtractResult)
+async def extract_contacts(req: ContactExtractRequest):
+    """Извлекает email и почтовый адрес с сайтов организаций.
+
+    Обрабатывает элементы по одному, выполняя краулинг в отдельном потоке,
+    чтобы не блокировать event loop. Разрешены поддомены в рамках одного
+    корневого домена. Возвращает 'как на сайте'.
+    """
+    logger.info("➡️ POST /extract-contacts from 127.0.0.1")
+    logger.info(f"🧾 Request body: {req.model_dump()}")
+    try:
+        logs: List[str] = []
+        out_items: List[ContactExtractedItem] = []
+        items = req.items or []
+        for it in items:
+            name = (it.name or '').strip()
+            website = (it.website or '').strip()
+            if website and not website.startswith(('http://', 'https://')):
+                website = 'http://' + website
+            if not website:
+                out_items.append(ContactExtractedItem(name=name, website='', email='', address=''))
+                continue
+            # Выполняем краулинг в отдельном потоке
+            logs.append(f"🔍 ProxyClient для {website}: {type(proxy_client) if proxy_client else 'None'}")
+            res, crawl_logs = await asyncio.to_thread(
+                contacts_crawler.extract_from_site,
+                website,
+                req.location,
+                allow_subdomains=True,
+                max_pages=12,
+                max_depth=2,
+                proxy_client=proxy_client,
+            )
+            try:
+                logs.extend(crawl_logs or [])
+            except Exception:
+                pass
+            email = (res or {}).get('email') or ''
+            address = (res or {}).get('address') or ''
+            out_items.append(ContactExtractedItem(name=name, website=website, email=email, address=address))
+
+        result = ContactExtractResult(
+            location=req.location,
+            items=out_items,
+            logs=logs,
+            timestamp=datetime.now().isoformat()
+        )
+        logger.info(f"⬅️ 200 POST /extract-contacts body: {result.model_dump()}")
+        return result
+    except Exception as e:
+        logger.error(f"Ошибка извлечения контактов: {e}")
+        raise HTTPException(status_code=500, detail=f"Ошибка извлечения контактов: {e}")
 
 @app.get("/", response_class=HTMLResponse)
 async def read_root():
@@ -407,14 +484,19 @@ async def export_names_excel_post(req: WebsiteExportRequest):
     """Экспорт списка названий (и сайтов, если переданы) через POST."""
     try:
         items = req.items or []
-        # Всегда экспортируем две колонки: name и website (даже если сайт не найден)
-        if not items:
-            df = pd.DataFrame(columns=['name', 'website'])
+        # Всегда экспортируем колонки: name, website, email, address
+        rows: List[Dict[str, str]] = []
+        for it in items:
+            rows.append({
+                'name': (it.name or ''),
+                'website': ((it.website or '').strip() or 'сайт не найден'),
+                'email': ((getattr(it, 'email', '') or '').strip() or 'не найден'),
+                'address': ((getattr(it, 'address', '') or '').strip() or 'не найден'),
+            })
+        if not rows:
+            df = pd.DataFrame(columns=['name', 'website', 'email', 'address'])
         else:
-            df = pd.DataFrame([
-                {'name': (it.name or ''), 'website': ((it.website or '').strip() or 'сайт не найден')}
-                for it in items
-            ], columns=['name', 'website'])
+            df = pd.DataFrame(rows, columns=['name', 'website', 'email', 'address'])
 
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         filename = f'названия_{req.location}_{timestamp}.xlsx'
@@ -428,9 +510,9 @@ async def export_names_excel_post(req: WebsiteExportRequest):
                 ws['A1'] = f'Названия для: {req.location}'
                 ws.insert_rows(2)
                 ws['A2'] = f'Дата экспорта: {datetime.now().strftime("%d.%m.%Y %H:%M")}'
-                # Объединяем заголовок на две колонки (name, website)
-                ws.merge_cells('A1:B1')
-                ws.merge_cells('A2:B2')
+                # Объединяем заголовок на четыре колонки
+                ws.merge_cells('A1:D1')
+                ws.merge_cells('A2:D2')
             return FileResponse(
                 temp_path,
                 media_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',

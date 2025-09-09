@@ -44,15 +44,19 @@ class ProxyAPIClient:
         
         # Формируем URL для конкретного провайдера (с несколькими вариантами путей)
         provider_paths = []
+        base_url = self.base_url
+        
         if provider == "openai":
             provider_paths = [
                 "/openai/v1/chat/completions",
                 "/v1/chat/completions",
             ]
         elif provider == "anthropic":
-            # ProxyAPI RU: стабильно работает только этот путь
+            # Для Anthropic используем специальный базовый URL
+            base_url = "https://api.proxyapi.ru"
             provider_paths = [
                 "/anthropic/v1/messages",
+                "/v1/messages",
             ]
         else:
             raise ValueError(f"Неподдерживаемая модель: {model}")
@@ -99,13 +103,13 @@ class ProxyAPIClient:
             }
         
         try:
-            logger.info(f"Отправляем запрос к ProxyAPI провайдер={provider}, base={self.base_url}")
+            logger.info(f"Отправляем запрос к ProxyAPI провайдер={provider}, base={base_url}")
             logger.info(f"Модель: {model}")
             logger.info(f"Промпт: {messages[-1]['content'][:200]}...")
             
             async with httpx.AsyncClient() as client:
                 for path in provider_paths:
-                    url = f"{self.base_url}{path}"
+                    url = f"{base_url}{path}"
                     try:
                         logger.info(f"Отправляем запрос к ProxyAPI ({provider}): {url}")
                         response = await client.post(
