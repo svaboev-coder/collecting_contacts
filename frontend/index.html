@@ -300,6 +300,89 @@
         .modal-btn { padding: 10px 18px; border: 0; border-radius: 8px; cursor: pointer; font-weight: 600; }
         .modal-btn-primary { background: #4facfe; color: #fff; }
 
+        /* Фиксированная кнопка Стоп */
+        .fixed-stop-button {
+            position: fixed;
+            top: 20px;
+            right: 20px;
+            z-index: 10000;
+            background: linear-gradient(135deg, #ff6b6b 0%, #ee5a24 100%);
+            color: white;
+            border: none;
+            border-radius: 50px;
+            padding: 15px 25px;
+            font-size: 16px;
+            font-weight: 600;
+            cursor: pointer;
+            box-shadow: 0 8px 20px rgba(255, 107, 107, 0.4);
+            transition: all 0.3s ease;
+            display: none;
+        }
+
+        .fixed-stop-button:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 12px 25px rgba(255, 107, 107, 0.6);
+        }
+
+        .fixed-stop-button:active {
+            transform: translateY(0);
+        }
+
+        .fixed-stop-button[disabled] {
+            opacity: 0.6;
+            cursor: not-allowed;
+            transform: none;
+            box-shadow: 0 4px 10px rgba(255, 107, 107, 0.2);
+        }
+
+        /* Сообщение о запуске процесса */
+        .process-message {
+            background: linear-gradient(135deg, #74b9ff 0%, #0984e3 100%);
+            color: white;
+            padding: 15px 20px;
+            border-radius: 10px;
+            margin: 20px 0;
+            text-align: center;
+            font-weight: 600;
+            box-shadow: 0 5px 15px rgba(116, 185, 255, 0.3);
+            display: none;
+        }
+
+        /* Динамическая таблица с фиксированной высотой */
+        .table-container {
+            max-height: 60vh;
+            overflow-y: auto;
+            border: 2px solid #e9ecef;
+            border-radius: 10px;
+            box-shadow: 0 5px 15px rgba(0,0,0,0.1);
+        }
+
+        .table-container::-webkit-scrollbar {
+            width: 8px;
+        }
+
+        .table-container::-webkit-scrollbar-track {
+            background: #f1f1f1;
+            border-radius: 4px;
+        }
+
+        .table-container::-webkit-scrollbar-thumb {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            border-radius: 4px;
+        }
+
+        .table-container::-webkit-scrollbar-thumb:hover {
+            background: linear-gradient(135deg, #5a6fd8 0%, #6a4190 100%);
+        }
+
+        /* Фиксированный заголовок таблицы */
+        .results-table thead th {
+            position: sticky;
+            top: 0;
+            z-index: 10;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        }
+
         @media (max-width: 768px) {
             .input-group {
                 flex-direction: column;
@@ -335,6 +418,9 @@
                     <input type="text" id="locationInput" placeholder="Например: Сочи, Анапа, Геленджик..." maxlength="100">
                     <button class="btn btn-secondary" onclick="getNamesList()">
                         🏨 Найти отели
+                    </button>
+                    <button class="btn btn-secondary" onclick="clearCacheForCurrentLocation()" title="Очистить кэш для текущего города">
+                        🗑️ Очистить кэш
                     </button>
                 </div>
             </div>
@@ -400,6 +486,11 @@
                 </div>
             </div>
 
+            <!-- Сообщение о запуске процесса извлечения контактов -->
+            <div class="process-message" id="processMessage">
+                🚀 Процесс извлечения контактов запущен...
+            </div>
+
             <div class="export-section" id="namesExportSection" style="display:none;">
                 <div id="websitesSummary" class="progress-text" style="margin:6px 0 10px 0; display:none;"></div>
                 <div style="display:flex; gap:10px; align-items:center;">
@@ -438,6 +529,11 @@
         </div>
     </div>
 
+    <!-- Фиксированная кнопка Стоп -->
+    <button class="fixed-stop-button" id="fixedStopBtn" onclick="stopAllProcesses()" disabled>
+        ⛔ Остановить процесс
+    </button>
+
     <script>
         let currentLocation = '';
         let isCollecting = false;
@@ -447,6 +543,7 @@
         let currentContacts = []; // сопоставление name -> { website, email, address }
         let activeController = null; // AbortController для отмены активного fetch
         let activeProcess = null;    // 'names' | 'websites' | 'contacts' | null
+        let processMsg = null;       // элемент для отображения сообщений о процессе
 
         function beginProcess(kind) {
             activeProcess = kind;
@@ -456,10 +553,24 @@
             }
             activeController = null;
             const stopBtn = document.getElementById('stopWebsitesBtn');
+            const fixedStopBtn = document.getElementById('fixedStopBtn');
             if (stopBtn) stopBtn.disabled = false;
+            if (fixedStopBtn) {
+                fixedStopBtn.disabled = false;
+                fixedStopBtn.style.display = 'block';
+            }
             // Деактивируем кнопку экспорта во время активного процесса
             const exportBtn = document.getElementById('namesExportBtn');
             if (exportBtn) exportBtn.disabled = true;
+            
+            // Показываем сообщение о процессе для извлечения контактов
+            if (kind === 'contacts') {
+                processMsg = document.getElementById('processMessage');
+                if (processMsg) {
+                    processMsg.style.display = 'block';
+                    processMsg.textContent = '🚀 Процесс извлечения контактов запущен...';
+                }
+            }
         }
         function endProcess() {
             activeProcess = null;
@@ -468,10 +579,21 @@
             }
             activeController = null;
             const stopBtn = document.getElementById('stopWebsitesBtn');
+            const fixedStopBtn = document.getElementById('fixedStopBtn');
             if (stopBtn) stopBtn.disabled = true;
+            if (fixedStopBtn) {
+                fixedStopBtn.disabled = true;
+                fixedStopBtn.style.display = 'none';
+            }
             // Реактивируем кнопку экспорта после завершения процесса
             const exportBtn = document.getElementById('namesExportBtn');
             if (exportBtn) exportBtn.disabled = false;
+            
+            // Скрываем сообщение о процессе
+            processMsg = document.getElementById('processMessage');
+            if (processMsg) {
+                processMsg.style.display = 'none';
+            }
         }
 
         // Модальное окно
@@ -666,6 +788,58 @@
                 alert('Пожалуйста, введите название курорта');
                 return;
             }
+            
+            // Проверяем кэш перед началом работы
+            addLog(`Проверяю кэш для города: ${location}`, 'info');
+            const cacheStatus = await checkCacheStatus(location);
+            
+            if (cacheStatus && cacheStatus.location_match) {
+                addLog(`Найден кэш для города: ${location}`, 'success');
+                
+                // Загружаем данные из кэша в интерфейс
+                loadCacheDataToUI();
+                
+                // Определяем следующий этап
+                const nextStage = getNextStageFromCache();
+                addLog(`Следующий этап: ${nextStage}`, 'info');
+                
+                // Если названия уже найдены, показываем их
+                if (cacheStatus.process_status.names_found && currentCacheData && currentCacheData.organizations) {
+                    const names = currentCacheData.organizations.map(org => org.name).filter(name => name);
+                    if (names.length > 0) {
+                        currentNames = names; // Обновляем глобальную переменную
+                        showNames(names);
+                        addLog(`Загружено ${names.length} названий из кэша`, 'success');
+                        
+                        // Активируем кнопки в зависимости от этапа
+                        if (cacheStatus.process_status.websites_found) {
+                            // Если сайты уже найдены, показываем кнопку "Извлечь контакты"
+                            const extractBtn = document.getElementById('extractContactsBtn');
+                            if (extractBtn) {
+                                extractBtn.style.display = 'inline-block';
+                                extractBtn.disabled = false;
+                            }
+                        } else {
+                            // Если сайты не найдены, показываем кнопку "Найти сайты"
+                            const findBtn = document.getElementById('findWebsitesBtn');
+                            if (findBtn) {
+                                findBtn.style.display = 'inline-block';
+                                findBtn.disabled = false;
+                            }
+                        }
+                        
+                        // Показываем секцию с кнопками
+                        const websitesSection = document.getElementById('websitesSection');
+                        if (websitesSection) {
+                            websitesSection.style.display = 'block';
+                        }
+                        return;
+                    }
+                }
+            } else {
+                addLog(`Кэш не найден, начинаю поиск с нуля`, 'info');
+            }
+            
             addLog(`Запрашиваю список названий для: ${location}`, 'info');
             try {
                 currentLocation = location;
@@ -714,6 +888,15 @@
                     addLog(`Получено названий: ${names.length}`, 'success');
                     document.getElementById('namesExportSection').style.display = 'block';
                     // таблица сайтов пока скрыта, до старта поиска сайтов
+                    
+                    // Обновляем кэш с найденными названиями
+                    const organizations = names.map(name => ({
+                        name: name,
+                        website: '',
+                        email: '',
+                        address: ''
+                    }));
+                    await updateCache(location, 'names', 'completed', organizations);
                 }
                 updateProgress(100, 'Готово!');
                 setTimeout(hideProgress, 800);
@@ -868,6 +1051,26 @@
                 showModal('Нет названий', 'Сначала получите список организаций (Найти отели).');
                 return;
             }
+            
+            // Проверяем кэш для сайтов
+            const cacheStatus = await checkCacheStatus(location);
+            if (cacheStatus && cacheStatus.location_match && cacheStatus.process_status.websites_found) {
+                addLog(`Сайты уже найдены в кэше для города: ${location}`, 'success');
+                
+                // Загружаем сайты из кэша
+                if (currentCacheData && currentCacheData.organizations) {
+                    const websites = currentCacheData.organizations
+                        .filter(org => org.website && org.website !== '')
+                        .map(org => ({ name: org.name, website: org.website }));
+                    
+                    if (websites.length > 0) {
+                        showWebsites(websites);
+                        addLog(`Загружено ${websites.length} сайтов из кэша`, 'success');
+                        return;
+                    }
+                }
+            }
+            
             try {
                 addLog(`Запускаю поиск сайтов для ${currentNames.length} организаций в ${location}...`, 'info');
                 // очищаем предыдущую таблицу сайтов до начала нового поиска
@@ -945,6 +1148,17 @@
                         summaryEl.textContent = `Поиск сайтов завершён: найдено ${okCount}, не найдено ${missCount}.`;
                         summaryEl.style.display = 'block';
                     }
+                    
+                    // Обновляем кэш с найденными сайтами
+                    if (Array.isArray(currentWebsiteItems) && currentWebsiteItems.length > 0) {
+                        const organizations = currentWebsiteItems.map(item => ({
+                            name: item.name,
+                            website: item.website,
+                            email: '',
+                            address: ''
+                        }));
+                        await updateCache(location, 'websites', 'completed', organizations);
+                    }
                 }
                 // Кнопка извлечения контактов доступна после завершения (в любом случае)
                 const extractBtn = document.getElementById('extractContactsBtn');
@@ -972,7 +1186,12 @@
                 if (!activeProcess) {
                     addLog('Нет активного процесса для остановки', 'warning');
                     const stopBtn = document.getElementById('stopWebsitesBtn');
+                    const fixedStopBtn = document.getElementById('fixedStopBtn');
                     if (stopBtn) stopBtn.disabled = true;
+                    if (fixedStopBtn) {
+                        fixedStopBtn.disabled = true;
+                        fixedStopBtn.style.display = 'none';
+                    }
                     return;
                 }
                 stopFinding = true;
@@ -980,9 +1199,20 @@
                     try { activeController.abort(); } catch {}
                 }
                 addLog('Останавливаю активный процесс...', 'warning');
+                
+                // Обновляем сообщение о процессе
+                processMsg = document.getElementById('processMessage');
+                if (processMsg && activeProcess === 'contacts') {
+                    processMsg.textContent = '⏹️ Процесс извлечения контактов остановлен...';
+                }
             } catch {}
             const stopBtn = document.getElementById('stopWebsitesBtn');
+            const fixedStopBtn = document.getElementById('fixedStopBtn');
             if (stopBtn) stopBtn.disabled = true;
+            if (fixedStopBtn) {
+                fixedStopBtn.disabled = true;
+                fixedStopBtn.style.display = 'none';
+            }
         }
 
         function showWebsites(items) {
@@ -1020,6 +1250,27 @@
                     return;
                 }
                 const location = currentLocation || '';
+                
+                // Проверяем кэш для контактов
+                const cacheStatus = await checkCacheStatus(location);
+                if (cacheStatus && cacheStatus.location_match && cacheStatus.process_status.contacts_extracted) {
+                    addLog(`Контакты уже извлечены в кэше для города: ${location}`, 'success');
+                    
+                    // Загружаем контакты из кэша
+                    if (currentCacheData && currentCacheData.organizations) {
+                        const contacts = currentCacheData.organizations.filter(org => 
+                            (org.email && org.email !== '') || (org.address && org.address !== '')
+                        );
+                        
+                        if (contacts.length > 0) {
+                            showContacts(contacts);
+                            addLog(`Загружено ${contacts.length} контактов из кэша`, 'success');
+                            endProcess();
+                            return;
+                        }
+                    }
+                }
+                
                 addLog('Начинаю извлечение контактов по найденным сайтам...', 'info');
                 // Очищаем предыдущее сообщение о поиске сайтов
                 const summaryEl = document.getElementById('websitesSummary');
@@ -1029,6 +1280,11 @@
                 }
                 // Показываем сообщение о начале процесса извлечения контактов
                 addLog('Процесс извлечения контактов запущен...', 'info');
+                processMsg = document.getElementById('processMessage');
+                if (processMsg) {
+                    processMsg.style.display = 'block';
+                    processMsg.textContent = '🚀 Процесс извлечения контактов запущен...';
+                }
                 showProgress();
                 const total = currentWebsiteItems.length;
                 const batchItems = currentWebsiteItems.map(it => ({ name: String(it.name||''), website: String(it.website||'') }));
@@ -1046,6 +1302,13 @@
                     }
                     const one = [batchItems[i]];
                     updateProgress(Math.round((i/Math.max(1,total))*90)+10, `Извлечение контактов... ${i+1}/${total}`);
+                    
+                    // Обновляем сообщение о процессе
+                    processMsg = document.getElementById('processMessage');
+                    if (processMsg) {
+                        processMsg.textContent = `🚀 Извлечение контактов... ${i+1}/${total}`;
+                    }
+                    
                     activeController = new AbortController();
                     const resp = await fetch('http://127.0.0.1:8001/extract-contacts', {
                         method: 'POST',
@@ -1068,6 +1331,13 @@
                     activeController = null;
                 }
                 updateProgress(100, 'Готово!');
+                
+                // Обновляем сообщение о завершении процесса
+                processMsg = document.getElementById('processMessage');
+                if (processMsg) {
+                    processMsg.textContent = '✅ Процесс извлечения контактов завершен!';
+                }
+                
                 setTimeout(hideProgress, 800);
                 const emailCount = currentContacts.filter(x => (x.email||'').trim()).length;
                 const addressCount = currentContacts.filter(x => (x.address||'').trim()).length;
@@ -1086,6 +1356,17 @@
                     if (summaryEl) {
                         summaryEl.textContent = `Извлечение контактов завершено: найдено email=${emailCount}, адресов=${addressCount}. Не найдено: email=${emailNotFound}, адресов=${addressNotFound}.`;
                         summaryEl.style.display = 'block';
+                    }
+                    
+                    // Обновляем кэш с извлеченными контактами
+                    if (Array.isArray(currentContacts) && currentContacts.length > 0) {
+                        const organizations = currentContacts.map(contact => ({
+                            name: contact.name,
+                            website: contact.website || '',
+                            email: contact.email || '',
+                            address: contact.address || ''
+                        }));
+                        await updateCache(location, 'contacts', 'completed', organizations);
                     }
                 }
             } catch (e) {
@@ -1127,6 +1408,212 @@
                 addLog('Экспорт сайтов завершён (CSV)', 'success');
             } catch (e) {
                 addLog(`Ошибка экспорта сайтов: ${e.message}`, 'error');
+            }
+        }
+
+        // ===== ФУНКЦИИ ДЛЯ РАБОТЫ С КЭШЕМ =====
+        
+        let cacheStatus = null;
+        let currentCacheData = null;
+
+        /**
+         * Проверяет статус кэша для указанного города
+         */
+        async function checkCacheStatus(location) {
+            try {
+                addLog(`Проверяю кэш для города: ${location}`, 'info');
+                const response = await fetch(`http://127.0.0.1:8001/cache-status/${encodeURIComponent(location)}`);
+                
+                if (!response.ok) {
+                    throw new Error(`HTTP ${response.status}`);
+                }
+                
+                cacheStatus = await response.json();
+                currentCacheData = cacheStatus.cache_data;
+                
+                addLog(`Статус кэша: ${cacheStatus.location_match ? 'найден' : 'не найден'}`, 'info');
+                addLog(`Следующий этап: ${cacheStatus.next_stage}`, 'info');
+                
+                if (cacheStatus.location_match && cacheStatus.organizations_count > 0) {
+                    addLog(`Найдено организаций в кэше: ${cacheStatus.organizations_count}`, 'info');
+                }
+                
+                return cacheStatus;
+            } catch (error) {
+                addLog(`Ошибка проверки кэша: ${error.message}`, 'error');
+                return null;
+            }
+        }
+
+        /**
+         * Обновляет кэш после завершения этапа
+         */
+        async function updateCache(location, stage, status, organizations = null) {
+            try {
+                const requestData = {
+                    location: location,
+                    stage: stage,
+                    status: status
+                };
+                
+                if (organizations) {
+                    requestData.organizations = organizations;
+                }
+                
+                addLog(`Обновляю кэш: этап ${stage}, статус ${status}`, 'info');
+                
+                const response = await fetch('http://127.0.0.1:8001/cache-update', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json; charset=utf-8',
+                        'Accept': 'application/json; charset=utf-8',
+                    },
+                    body: JSON.stringify(requestData)
+                });
+                
+                if (!response.ok) {
+                    throw new Error(`HTTP ${response.status}`);
+                }
+                
+                const result = await response.json();
+                addLog(`Кэш обновлен: ${result.message}`, 'success');
+                return true;
+            } catch (error) {
+                addLog(`Ошибка обновления кэша: ${error.message}`, 'error');
+                return false;
+            }
+        }
+
+        /**
+         * Очищает кэш для указанного города
+         */
+        async function clearCache(location) {
+            try {
+                addLog(`Очищаю кэш для города: ${location}`, 'info');
+                const response = await fetch(`http://127.0.0.1:8001/cache-clear/${encodeURIComponent(location)}`, {
+                    method: 'POST'
+                });
+                
+                if (!response.ok) {
+                    throw new Error(`HTTP ${response.status}`);
+                }
+                
+                const result = await response.json();
+                addLog(`Кэш очищен: ${result.message}`, 'success');
+                return true;
+            } catch (error) {
+                addLog(`Ошибка очистки кэша: ${error.message}`, 'error');
+                return false;
+            }
+        }
+
+        /**
+         * Загружает данные из кэша в интерфейс
+         */
+        function loadCacheDataToUI() {
+            if (!currentCacheData || !currentCacheData.organizations) {
+                return;
+            }
+            
+            const organizations = currentCacheData.organizations;
+            
+            // Загружаем названия и обновляем глобальную переменную
+            if (organizations.length > 0) {
+                const names = organizations.map(org => org.name).filter(name => name);
+                if (names.length > 0) {
+                    currentNames = names; // Обновляем глобальную переменную
+                    showNames(names);
+                    addLog(`Загружено ${names.length} названий из кэша`, 'success');
+                }
+            }
+            
+            // Загружаем сайты и обновляем глобальную переменную
+            const websites = organizations.filter(org => org.website && org.website !== '').map(org => ({
+                name: org.name,
+                website: org.website
+            }));
+            
+            if (websites.length > 0) {
+                currentWebsiteItems = websites; // Обновляем глобальную переменную
+                showWebsites(websites);
+                addLog(`Загружено ${websites.length} сайтов из кэша`, 'success');
+            }
+            
+            // Загружаем контакты и обновляем глобальную переменную
+            const contacts = organizations.filter(org => 
+                (org.email && org.email !== '') || (org.address && org.address !== '')
+            );
+            
+            if (contacts.length > 0) {
+                currentContacts = contacts; // Обновляем глобальную переменную
+                showContacts(contacts);
+                addLog(`Загружено ${contacts.length} контактов из кэша`, 'success');
+            }
+        }
+
+        /**
+         * Определяет следующий этап на основе кэша
+         */
+        function getNextStageFromCache() {
+            if (!cacheStatus) {
+                return 'names';
+            }
+            
+            return cacheStatus.next_stage;
+        }
+
+        /**
+         * Проверяет, нужно ли выполнять этап заново
+         */
+        function shouldExecuteStage(stage) {
+            if (!cacheStatus) {
+                return true;
+            }
+            
+            const status = cacheStatus.process_status;
+            
+            switch (stage) {
+                case 'names':
+                    return !status.names_found || status.last_stage_status === 'interrupted';
+                case 'websites':
+                    return !status.websites_found || status.last_stage_status === 'interrupted';
+                case 'contacts':
+                    return !status.contacts_extracted || status.last_stage_status === 'interrupted';
+                default:
+                    return true;
+            }
+        }
+
+        /**
+         * Очищает кэш для текущего города
+         */
+        async function clearCacheForCurrentLocation() {
+            const location = document.getElementById('locationInput').value.trim();
+            if (!location) {
+                alert('Пожалуйста, введите название курорта');
+                return;
+            }
+            
+            if (confirm(`Вы уверены, что хотите очистить кэш для города "${location}"?\n\nЭто удалит все сохраненные данные и начнет поиск с нуля.`)) {
+                const success = await clearCache(location);
+                if (success) {
+                    // Очищаем интерфейс
+                    document.getElementById('namesSection').style.display = 'none';
+                    document.getElementById('namesExportSection').style.display = 'none';
+                    document.getElementById('websitesSection').style.display = 'none';
+                    document.getElementById('websitesExportSection').style.display = 'none';
+                    document.getElementById('contactsSection').style.display = 'none';
+                    document.getElementById('contactsExportSection').style.display = 'none';
+                    
+                    // Очищаем переменные
+                    currentNames = [];
+                    currentWebsiteItems = [];
+                    currentContacts = [];
+                    cacheStatus = null;
+                    currentCacheData = null;
+                    
+                    addLog(`Кэш очищен для города: ${location}`, 'success');
+                }
             }
         }
 

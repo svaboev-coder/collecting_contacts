@@ -26,11 +26,13 @@ try:
     from utils import contact_extractor, scraper, name_finder, contacts_crawler
     from agent import ContactAgent, WebsiteFinderAgent
     from proxy_api import ProxyAPIClient
+    from cache_manager import cache_manager, CacheData, Organization, ProcessStatus
 except ImportError:
     # Запуск как пакет (uvicorn backend.main:app)
     from backend.utils import contact_extractor, scraper, name_finder, contacts_crawler
     from backend.agent import ContactAgent, WebsiteFinderAgent
     from backend.proxy_api import ProxyAPIClient
+    from backend.cache_manager import cache_manager, CacheData, Organization, ProcessStatus
 
 # Настройка логирования (принудительно + абсолютный путь)
 LOG_PATH = '/app/backend_debug.log'
@@ -191,6 +193,20 @@ class WebsiteExportItem(BaseModel):
 class WebsiteExportRequest(BaseModel):
     location: str
     items: List[WebsiteExportItem]
+
+# Новые модели для работы с кэшем
+class CacheStatusResponse(BaseModel):
+    location_match: bool
+    next_stage: str
+    process_status: Dict[str, Any]
+    organizations_count: int
+    cache_data: Optional[Dict[str, Any]] = None
+
+class CacheUpdateRequest(BaseModel):
+    location: str
+    stage: str  # 'names', 'websites', 'contacts'
+    status: str  # 'completed', 'interrupted', 'not_started'
+    organizations: Optional[List[Dict[str, str]]] = None
 
 
 class ContactExtractItem(BaseModel):
@@ -540,6 +556,104 @@ async def find_websites(request: WebsiteFindRequest):
     except Exception as e:
         logger.error(f"Ошибка поиска сайтов: {e}")
         raise HTTPException(status_code=500, detail=f"Ошибка поиска сайтов: {e}")
+
+# Новые API endpoints для работы с кэшем
+@app.get("/cache-status/{location}", response_model=CacheStatusResponse)
+async def get_cache_status(location: str):
+    """Проверяет статус кэша для указанного города"""
+    try:
+        location_match, cache_data = cache_manager.check_location_match(location)
+        
+        if not location_match:
+            return CacheStatusResponse(
+                location_match=False,
+                next_stage="names",
+                process_status={"names_found": False, "websites_found": False, "contacts_extracted": False},
+                organizations_count=0
+            )
+        
+        next_stage = cache_manager.get_next_stage(cache_data)
+        process_status = {
+            "names_found": cache_data.process_status.names_found,
+            "websites_found": cache_data.process_status.websites_found,
+            "contacts_extracted": cache_data.process_status.contacts_extracted,
+            "last_completed_stage": cache_data.process_status.last_completed_stage,
+            "last_stage_status": cache_data.process_status.last_stage_status
+        }
+        
+        return CacheStatusResponse(
+            location_match=True,
+            next_stage=next_stage,
+            process_status=process_status,
+            organizations_count=len(cache_data.organizations),
+            cache_data={
+                "current_location": cache_data.current_location,
+                "last_update": cache_data.last_update,
+                "organizations": [
+                    {
+                        "name": org.name,
+                        "website": org.website,
+                        "email": org.email,
+                        "address": org.address
+                    }
+                    for org in cache_data.organizations
+                ]
+            }
+        )
+    except Exception as e:
+        logger.error(f"Ошибка получения статуса кэша: {e}")
+        raise HTTPException(status_code=500, detail=f"Ошибка получения статуса кэша: {e}")
+
+@app.post("/cache-update")
+async def update_cache(request: CacheUpdateRequest):
+    """Обновляет кэш после завершения этапа"""
+    try:
+        # Проверяем совпадение города
+        location_match, cache_data = cache_manager.check_location_match(request.location)
+        
+        if not location_match:
+            # Создаем новый кэш для нового города
+            cache_manager.archive_current_cache()
+            cache_data = cache_manager.create_empty_cache(request.location)
+        
+        # Обновляем статус этапа
+        cache_data = cache_manager.update_stage_status(cache_data, request.stage, request.status)
+        
+        # Обновляем организации если переданы
+        if request.organizations:
+            cache_data.organizations = [
+                Organization(
+                    name=org.get("name", ""),
+                    website=org.get("website", ""),
+                    email=org.get("email", ""),
+                    address=org.get("address", "")
+                )
+                for org in request.organizations
+            ]
+        
+        # Сохраняем кэш
+        success = cache_manager.save_cache(cache_data)
+        
+        if success:
+            return {"status": "success", "message": "Кэш обновлен"}
+        else:
+            raise HTTPException(status_code=500, detail="Ошибка сохранения кэша")
+            
+    except Exception as e:
+        logger.error(f"Ошибка обновления кэша: {e}")
+        raise HTTPException(status_code=500, detail=f"Ошибка обновления кэша: {e}")
+
+@app.post("/cache-clear/{location}")
+async def clear_cache(location: str):
+    """Очищает кэш для указанного города"""
+    try:
+        cache_manager.archive_current_cache()
+        cache_manager.clear_cache()
+        logger.info(f"Кэш очищен для города: {location}")
+        return {"status": "success", "message": "Кэш очищен"}
+    except Exception as e:
+        logger.error(f"Ошибка очистки кэша: {e}")
+        raise HTTPException(status_code=500, detail=f"Ошибка очистки кэша: {e}")
 
 @app.post("/collect-contacts", response_model=CollectionResult)
 async def collect_contacts(request: LocationRequest, background_tasks: BackgroundTasks):

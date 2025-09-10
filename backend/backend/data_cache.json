@@ -1,0 +1,127 @@
+{
+  "current_location": "джанхот",
+  "last_update": "2025-09-10T04:08:53.537143",
+  "process_status": {
+    "names_found": true,
+    "websites_found": true,
+    "contacts_extracted": true,
+    "last_completed_stage": "contacts",
+    "last_stage_status": "completed"
+  },
+  "organizations": [
+    {
+      "name": "панс. Джанхот",
+      "website": "https://hoteldzhanhot.ru/",
+      "email": "info-hoteldzhanhot@yandex.ru",
+      "address": "краснодарский край, муниципальное образование геленджик, хутор джанхот, черноморская улица, 1"
+    },
+    {
+      "name": "Гостевой дом Джанхот",
+      "website": "http://beregmore.com/",
+      "email": "",
+      "address": "краснодарский край, муниципальное образование геленджик, хутор джанхот, морской переулок, 1а"
+    },
+    {
+      "name": "Сафоново",
+      "website": "https://safgel.ru/",
+      "email": "svtkolom@yandex.ru",
+      "address": "краснодарский край, муниципальное образование геленджик, хутор джанхот, пицундский переулок, 5"
+    },
+    {
+      "name": "Эдем",
+      "website": "",
+      "email": "",
+      "address": ""
+    },
+    {
+      "name": "Ле Шале",
+      "website": "https://le-shale.ru/",
+      "email": "Le-hale@mail.ru",
+      "address": "краснодарский край, муниципальное образование геленджик, хутор джанхот, черноморская улица, 1"
+    },
+    {
+      "name": "Императрица",
+      "website": "https://джанхот-императрица.рф/",
+      "email": "",
+      "address": "краснодарский край, городской округ геленджик, хутор джанхот, черноморская улица, 2"
+    },
+    {
+      "name": "Под синей крышей",
+      "website": "",
+      "email": "",
+      "address": ""
+    },
+    {
+      "name": "Мини отель",
+      "website": "https://hoteldzhanhot.ru/",
+      "email": "info-hoteldzhanhot@yandex.ru",
+      "address": "краснодарский край, муниципальное образование геленджик, хутор джанхот, черноморская улица, 1"
+    },
+    {
+      "name": "Greenwood",
+      "website": "https://greenwood-guests.clients.site/",
+      "email": "",
+      "address": "краснодарский край, городской округ геленджик, хутор джанхот"
+    },
+    {
+      "name": "Вилла Хвоя",
+      "website": "",
+      "email": "",
+      "address": ""
+    },
+    {
+      "name": "Морская вилла",
+      "website": "",
+      "email": "",
+      "address": ""
+    },
+    {
+      "name": "Коттеджи Санторини",
+      "website": "https://santorinii.clients.site/",
+      "email": "",
+      "address": "краснодарский край, городской округ геленджик, хутор джанхот, морской переулок, 6"
+    },
+    {
+      "name": "Сосновый рай",
+      "website": "https://hoteldzhanhot.ru/",
+      "email": "info-hoteldzhanhot@yandex.ru",
+      "address": "краснодарский край, муниципальное образование геленджик, хутор джанхот, черноморская улица, 1"
+    },
+    {
+      "name": "МАЯК",
+      "website": "",
+      "email": "",
+      "address": ""
+    },
+    {
+      "name": "Море сосен",
+      "website": "",
+      "email": "",
+      "address": ""
+    },
+    {
+      "name": "Домик у моря",
+      "website": "https://сказкауморя.рф/",
+      "email": "",
+      "address": "краснодарский край, городской округ геленджик, хутор джанхот, улица короленко, 2"
+    },
+    {
+      "name": "ДОЛ Малоземелец",
+      "website": "",
+      "email": "",
+      "address": ""
+    },
+    {
+      "name": "Благодать",
+      "website": "https://blagodat-na-more.ru/",
+      "email": "blagodat.ru@mail.ru",
+      "address": "краснодарский край, городской округ геленджик, хутор джанхот, черноморская улица, 15"
+    },
+    {
+      "name": "ЦРД \"Здоровье\" (Академия лидерства)",
+      "website": "https://nextleaders.ru/",
+      "email": "",
+      "address": "краснодарский край, муниципальное образование город геленджик, хутор джанхот, черноморская улица, 18"
+    }
+  ]
+}

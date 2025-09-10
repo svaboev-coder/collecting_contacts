@@ -1,0 +1,85 @@
+{
+  "current_location": "сукко",
+  "last_update": "2025-09-10T04:03:40.998981",
+  "process_status": {
+    "names_found": true,
+    "websites_found": true,
+    "contacts_extracted": true,
+    "last_completed_stage": "contacts",
+    "last_stage_status": "completed"
+  },
+  "organizations": [
+    {
+      "name": "Гостевой дом \"Винговер\"",
+      "website": "https://wingover.su/",
+      "email": "",
+      "address": "краснодарский край, муниципальный округ анапа, село сукко, учительская улица, 11"
+    },
+    {
+      "name": "Отель \"Долина Сукко\"",
+      "website": "https://dolinasukko.ru/",
+      "email": "bron2@dolinasukko.ru",
+      "address": "краснодарский край, муниципальный округ анапа, село сукко, 1-й проезд, 14"
+    },
+    {
+      "name": "Гостиничный комплекс \"Дельмонт\"",
+      "website": "https://delmont.ru/",
+      "email": "delmont@mail.ru",
+      "address": "краснодарский край, муниципальный округ анапа, село сукко, центральная улица, 14"
+    },
+    {
+      "name": "Смена - Нептун2",
+      "website": "https://смена.дети/",
+      "email": "",
+      "address": "краснодарский край, муниципальный округ анапа, село сукко, территория вдц смена"
+    },
+    {
+      "name": "Жемчужина",
+      "website": "http://sukko-hotel.ru/",
+      "email": "mail@sukko-hotel.ru",
+      "address": "краснодарский край, муниципальный округ анапа, село сукко, центральная улица, 2д"
+    },
+    {
+      "name": "Ласковый берег",
+      "website": "http://anapaotel.ru/",
+      "email": "",
+      "address": "краснодарский край, муниципальный округ анапа, село сукко, лермонтовский проезд, 9"
+    },
+    {
+      "name": "Солнечный берег",
+      "website": "https://solnechnyy-bereg-sukko.younga.ru/",
+      "email": "",
+      "address": "краснодарский край, муниципальный округ анапа, село сукко"
+    },
+    {
+      "name": "Медовик",
+      "website": "http://www.dom-medovik.ru/",
+      "email": "",
+      "address": ""
+    },
+    {
+      "name": "Эко-отель Усадьба Сукко",
+      "website": "https://usadbasukko.ru/",
+      "email": "sale@usadbasukko.ru",
+      "address": "краснодарский край, муниципальный округ анапа, село сукко, советская улица, 135а"
+    },
+    {
+      "name": "Гольфстрим",
+      "website": "http://гольфстрим-сукко.рф/",
+      "email": "",
+      "address": "краснодарский край, муниципальный округ анапа, село сукко"
+    },
+    {
+      "name": "Семейный клуб-отель \"Charme'L\"",
+      "website": "https://charmel-anapa.ru/",
+      "email": "charmel.anapa@gmail.com",
+      "address": "краснодарский край, муниципальный округ анапа, село сукко, 3-й проезд, 12"
+    },
+    {
+      "name": "ДОЛ \"Энергетик\"",
+      "website": "https://energetik-anapa.ru/",
+      "email": "energetik.lager@yandex.ru",
+      "address": "краснодарский край, муниципальный округ анапа, село сукко"
+    }
+  ]
+}

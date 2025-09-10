@@ -420,6 +420,7 @@ class WebsiteFinderAgent:
         except Exception:
             agg = []
         ys = yandex_search.find_website(name, location, aggregator_domains=agg)
+        logs.append(f"🔍 Яндекс API результат: {ys}")
         if ys:
             logs.append(f"🟢 Яндекс: официальный сайт найден: {ys}")
             logs.append(f"✅ Выбран сайт: {ys}")
