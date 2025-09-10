@@ -54,6 +54,8 @@ Thumbs.db
 # Logs
 *.log
 logs/
+backend_debug.log
+backend/backend_debug.log
 
 # Temporary files
 *.tmp
