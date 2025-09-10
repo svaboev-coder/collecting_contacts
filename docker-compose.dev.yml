@@ -2,7 +2,7 @@ version: '3.8'
 
 services:
   backend:
-    image: collecting_contacts_clone-backend:v1.0-stable
+    build: ./backend
     ports:
       - "8001:8001"
     env_file:
@@ -11,10 +11,14 @@ services:
       - OPENAI_API_KEY=${OPENAI_API_KEY}
       - PROXYAPI_KEY=${PROXYAPI_KEY}
       - PROXYAPI_BASE_URL=${PROXYAPI_BASE_URL}
+    volumes:
+      - ./backend:/app
 
   frontend:
-    image: collecting_contacts_clone-frontend:v1.0-stable
+    build: ./frontend
     ports:
       - "8080:80"
+    volumes:
+      - ./frontend:/usr/share/nginx/html
     depends_on:
       - backend

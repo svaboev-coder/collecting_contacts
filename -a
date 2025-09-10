@@ -1,0 +1,5 @@
+[33m48e3dc8[m[33m ([m[1;36mHEAD[m[33m -> [m[1;32mmain[m[33m, [m[1;31morigin/main[m[33m, [m[1;31morigin/HEAD[m[33m)[m feat: Implement comprehensive caching system and improve contact extraction
+[33m2ecfc26[m ✅ справлена интеграция LLM с ProxyAPI - теперь email извлекаются корректно
+[33m4d6800b[m feat(frontend,backend): website finder via Yandex API + sequential search UI; export names+sites; final UI msgs; docker compose env_file
+[33m728552b[m UI: улучшены кнопки, модальное окно ошибок, экспорт блокируется при пустом списке; Backend: файловый кэш названий, очистка temp-файлов, фиксы импорта и логики list-names; dev: автозапуски серверов
+[33m0de29e0[m first commit
